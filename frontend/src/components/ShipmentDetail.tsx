@@ -4,6 +4,7 @@ import { StatusBadge } from './StatusBadge'
 
 interface ShipmentDetailProps {
   shipment: Shipment
+  outsideResults?: boolean
   onClose: () => void
 }
 
@@ -28,7 +29,7 @@ function relativeTime(value: string) {
   return `${Math.round(hours / 24)}d ago`
 }
 
-export function ShipmentDetail({ shipment, onClose }: ShipmentDetailProps) {
+export function ShipmentDetail({ shipment, outsideResults, onClose }: ShipmentDetailProps) {
   return (
     <section className="shipment-detail" aria-label="Selected shipment details">
       <div className="detail-header">
@@ -48,6 +49,7 @@ export function ShipmentDetail({ shipment, onClose }: ShipmentDetailProps) {
       </div>
 
       <div className="detail-content">
+        {outsideResults ? <p className="selection-notice" role="status">현재 검색 결과 외 배송</p> : null}
         <div className="detail-description">
           <span className="detail-label">Cargo</span>
           <strong>{shipment.title}</strong>

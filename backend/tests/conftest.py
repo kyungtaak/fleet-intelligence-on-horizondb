@@ -8,6 +8,8 @@ from app.config import Settings
 from app.models import (
     DatabaseCapabilities,
     Shipment,
+    ShipmentFilters,
+    ShipmentSearchResult,
     ShipmentStats,
     ShipmentStatus,
     StatusCount,
@@ -68,6 +70,12 @@ class FakeShipmentRepository:
             None,
         )
 
+    async def search_shipments(self, filters: ShipmentFilters, limit: int) -> ShipmentSearchResult:
+        shipments = await self.semantic_search(filters.cargo_query, filters.status, limit)
+        return ShipmentSearchResult(
+            shipments=shipments, search_mode="diskann_cosine", applied_filters=filters,
+        )
+
     async def stats(self) -> ShipmentStats:
         counts = {
             status: sum(item.status is status for item in self._shipments)
@@ -103,8 +111,7 @@ class InvokingAgent:
     async def run(self, prompt: str) -> SimpleNamespace:
         tool_result = await self._shipment_tool.invoke(
             arguments={
-                "query_text": prompt,
-                "status_filter": "all",
+                "filters": {"cargo_query": prompt},
             }
         )
         payload = json.loads(tool_result[0].text)

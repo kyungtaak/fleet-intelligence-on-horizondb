@@ -1,22 +1,42 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   ArrowRight,
   Bot,
   LocateFixed,
   RotateCcw,
   Send,
+  Square,
   UserRound,
 } from 'lucide-react'
-import type { SearchResponse, Shipment } from '../types'
+import type { SearchProgress, SearchResponse, Shipment, ShipmentStatus } from '../types'
 import { StatusBadge } from './StatusBadge'
+import { SearchTrace } from './SearchTrace'
 
 const SUGGESTIONS = [
-  'Show medical supplies for clinics',
-  'Find delayed electronics from Asia',
-  'Which shipments are going to Europe?',
-  'Show cold-chain food and medicine',
+  '지연된 배송을 찾아주세요',
+  '아시아권이 출발지인 배송은?',
+  '아시아에서 출발한 의료용품을 찾아주세요',
+  '부산 반경 100km 이내에서 출발한 배송을 찾아주세요',
 ]
+
+const SEARCH_MODE_LABELS: Record<SearchResponse['search_mode'], string> = {
+  sql: 'SQL 조건 검색',
+  gis: 'PostGIS 공간 검색',
+  diskann_cosine: '의미 검색',
+  hybrid: '조건 + 의미 검색',
+  not_searched: '조건 확인 필요',
+}
+
+const STATUS_LABELS_KO: Record<ShipmentStatus, string> = {
+  in_transit: '운송 중',
+  delivered: '배송 완료',
+  delayed: '지연',
+  exception: '문제 발생',
+  unknown: '상태 미확인',
+}
 
 interface ChatMessage {
   id: number
@@ -24,10 +44,19 @@ interface ChatMessage {
   text: string
   shipments?: Shipment[]
   chatModel?: string
+  searchMode?: SearchResponse['search_mode']
+  hasMore?: boolean
+  filters?: SearchResponse['applied_filters']
+  trace?: SearchProgress[]
+  outcome?: 'completed' | 'failed' | 'cancelled'
+  startedAt?: number
+  durationMs?: number
 }
 
 interface ChatPanelProps {
-  onSearch: (query: string) => Promise<SearchResponse>
+  onSearch: (query: string, onProgress: (event: SearchProgress) => void, signal: AbortSignal) => Promise<SearchResponse>
+  selectedNumber: string | null
+  onSelect: (shipment: Shipment) => void
   onLocate: (shipment: Shipment) => void
   onShowAll: () => void
 }
@@ -35,23 +64,33 @@ interface ChatPanelProps {
 const initialMessage: ChatMessage = {
   id: 1,
   role: 'assistant',
-  text: 'Ask about cargo, routes, regions, or shipment status. I will rank the closest matches by cosine similarity.',
+  text: '안녕하세요. 어떤 배송을 확인해 드릴까요?',
 }
 
-export function ChatPanel({ onSearch, onLocate, onShowAll }: ChatPanelProps) {
+export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShowAll }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([initialMessage])
   const [input, setInput] = useState('')
   const [searching, setSearching] = useState(false)
   const messageEnd = useRef<HTMLDivElement>(null)
   const nextMessageId = useRef(2)
+  const activeRequest = useRef<AbortController | null>(null)
+  const [progress, setProgress] = useState<SearchProgress[]>([])
+  const [startedAt, setStartedAt] = useState(0)
+
+  useEffect(() => () => activeRequest.current?.abort(), [])
 
   useEffect(() => {
     messageEnd.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }, [messages, searching])
 
-  async function submitQuery(query: string) {
+  async function submitQuery(query: string, started: number) {
     const normalized = query.trim()
-    if (normalized.length < 2 || searching) return
+    if (normalized.length < 2 || activeRequest.current) return
+    const controller = new AbortController()
+    activeRequest.current = controller
+    const trace: SearchProgress[] = []
+    setProgress([])
+    setStartedAt(started)
 
     const userMessage: ChatMessage = {
       id: nextMessageId.current++,
@@ -63,7 +102,11 @@ export function ChatPanel({ onSearch, onLocate, onShowAll }: ChatPanelProps) {
     setSearching(true)
 
     try {
-      const result = await onSearch(normalized)
+      const result = await onSearch(normalized, (event) => {
+        if (controller.signal.aborted) return
+        trace.push(event)
+        setProgress([...trace])
+      }, controller.signal)
       setMessages((current) => [
         ...current,
         {
@@ -72,6 +115,13 @@ export function ChatPanel({ onSearch, onLocate, onShowAll }: ChatPanelProps) {
           text: result.answer,
           shipments: result.shipments,
           chatModel: result.chat_model,
+          searchMode: result.search_mode,
+          hasMore: result.has_more,
+          filters: result.applied_filters,
+          trace,
+          outcome: 'completed',
+          startedAt: started,
+          durationMs: performance.now() - started,
         },
       ])
     } catch (error) {
@@ -80,20 +130,26 @@ export function ChatPanel({ onSearch, onLocate, onShowAll }: ChatPanelProps) {
         {
           id: nextMessageId.current++,
           role: 'assistant',
-          text:
-            error instanceof Error
-              ? `Search failed: ${error.message}`
-              : 'Search failed. Please try again.',
+          text: controller.signal.aborted
+            ? '요청을 중단했습니다.'
+            : error instanceof Error && error.name !== 'TimeoutError'
+              ? error.message
+              : '응답 대기 시간이 초과되었습니다. 다시 시도해 주세요.',
+          trace,
+          outcome: controller.signal.aborted ? 'cancelled' : 'failed',
+          startedAt: started,
+          durationMs: performance.now() - started,
         },
       ])
     } finally {
+      activeRequest.current = null
       setSearching(false)
     }
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    void submitQuery(input)
+    void submitQuery(input, event.timeStamp)
   }
 
   function resetChat() {
@@ -103,17 +159,18 @@ export function ChatPanel({ onSearch, onLocate, onShowAll }: ChatPanelProps) {
   }
 
   return (
-    <aside className="chat-panel workspace-panel" aria-label="Semantic shipment search">
+    <aside className="chat-panel workspace-panel" aria-label="AI 배송 도우미" lang="ko">
       <div className="panel-heading chat-heading">
         <div>
-          <span className="eyebrow">Vector search</span>
-          <h2>Shipment assistant</h2>
+          <span className="eyebrow">배송 검색</span>
+          <h2>AI 배송 도우미</h2>
         </div>
         <button
           className="icon-button"
           type="button"
-          title="Reset conversation"
-          aria-label="Reset conversation"
+          title="대화 초기화"
+          aria-label="대화 초기화"
+          disabled={searching}
           onClick={resetChat}
         >
           <RotateCcw size={17} />
@@ -131,14 +188,58 @@ export function ChatPanel({ onSearch, onLocate, onShowAll }: ChatPanelProps) {
               )}
             </span>
             <div className="chat-turn-content">
-              <p>{message.text}</p>
+              {message.trace ? (
+                <SearchTrace events={message.trace} outcome={message.outcome ?? 'completed'} startedAt={message.startedAt ?? 0} durationMs={message.durationMs} />
+              ) : null}
+              {message.role === 'assistant' ? (
+                <div className="chat-markdown">
+                  <Markdown
+                    remarkPlugins={[remarkGfm]}
+                    skipHtml
+                    disallowedElements={['img']}
+                    components={{
+                      table: ({ children }) => (
+                        <div className="chat-table-scroll" role="region" aria-label="배송 정보 표" tabIndex={0}>
+                          <table>{children}</table>
+                        </div>
+                      ),
+                    }}
+                  >
+                    {message.text}
+                  </Markdown>
+                </div>
+              ) : (
+                <p>{message.text}</p>
+              )}
+              {message.searchMode && message.searchMode !== 'not_searched' ? (
+                <div className="chat-search-summary">
+                  <strong>{SEARCH_MODE_LABELS[message.searchMode]}</strong>
+                  <span>{message.shipments?.length ?? 0}건 표시</span>
+                  {message.filters ? (
+                    <span>
+                      {[
+                        message.filters.status && `상태: ${STATUS_LABELS_KO[message.filters.status]}`,
+                        message.filters.shipment_number,
+                        message.filters.origin_region && `출발 권역: ${message.filters.origin_region}`,
+                        message.filters.destination_region && `도착 권역: ${message.filters.destination_region}`,
+                        message.filters.origin_name && `출발지: ${message.filters.origin_name}`,
+                        message.filters.destination_name && `도착지: ${message.filters.destination_name}`,
+                        message.filters.nearby_location && `${{ origin: '출발', destination: '도착', current: '현재' }[message.filters.position_field]} 위치: ${message.filters.nearby_location} 반경 ${message.filters.radius_km}km`,
+                        message.filters.cargo_query && `화물 검색어: ${message.filters.cargo_query}`,
+                      ].filter(Boolean).join(' · ')}
+                    </span>
+                  ) : null}
+                  {message.hasMore ? <span>표시되지 않은 결과가 더 있습니다. 조건을 좁혀 주세요.</span> : null}
+                </div>
+              ) : null}
               {messageIndex === 0 ? (
                 <div className="suggestion-list">
                   {SUGGESTIONS.map((suggestion) => (
                     <button
                       type="button"
                       key={suggestion}
-                      onClick={() => void submitQuery(suggestion)}
+                      disabled={searching}
+                      onClick={(event) => void submitQuery(suggestion, event.timeStamp)}
                     >
                       {suggestion}
                     </button>
@@ -149,10 +250,17 @@ export function ChatPanel({ onSearch, onLocate, onShowAll }: ChatPanelProps) {
               {message.shipments?.length ? (
                 <div className="chat-results">
                   {message.shipments.map((shipment) => (
-                    <article className="chat-result" key={shipment.id}>
+                    <article className={`chat-result${selectedNumber === shipment.shipment_number ? ' selected' : ''}`} key={shipment.id}>
+                      <button
+                        className="chat-result-select"
+                        type="button"
+                        aria-label={`${shipment.shipment_number} 배송 상세 보기`}
+                        aria-pressed={selectedNumber === shipment.shipment_number}
+                        onClick={() => onSelect(shipment)}
+                      >
                       <div className="chat-result-header">
                         <strong>{shipment.shipment_number}</strong>
-                        <StatusBadge status={shipment.status} compact />
+                        <StatusBadge status={shipment.status} label={STATUS_LABELS_KO[shipment.status]} compact />
                       </div>
                       <b>{shipment.title}</b>
                       <p>{shipment.description}</p>
@@ -161,21 +269,22 @@ export function ChatPanel({ onSearch, onLocate, onShowAll }: ChatPanelProps) {
                         <ArrowRight size={12} aria-hidden="true" />
                         <span>{shipment.destination_name}</span>
                       </div>
+                      </button>
                       <div className="chat-result-footer">
                         <span>
                           {shipment.similarity !== null
-                            ? `${Math.round(shipment.similarity * 100)}% similar`
-                            : 'Semantic match'}
+                            ? `유사도 ${Math.round(shipment.similarity * 100)}%`
+                            : '조건 일치'}
                         </span>
                         <button type="button" onClick={() => onLocate(shipment)}>
                           <LocateFixed size={14} />
-                          Locate
+                          현재 위치 보기
                         </button>
                       </div>
                     </article>
                   ))}
                   <span className="query-engine">
-                    {message.chatModel} · Agent Framework · DiskANN
+                    {message.chatModel} · {message.searchMode ? SEARCH_MODE_LABELS[message.searchMode] : '배송 검색'}
                   </span>
                 </div>
               ) : null}
@@ -188,10 +297,9 @@ export function ChatPanel({ onSearch, onLocate, onShowAll }: ChatPanelProps) {
             <span className="chat-avatar" aria-hidden="true">
               <Bot size={17} />
             </span>
-            <div className="typing-indicator" aria-label="Searching">
-              <span />
-              <span />
-              <span />
+            <div className="chat-turn-content">
+              <div role="status">{progress.at(-1)?.message ?? '요청을 전송하고 있습니다.'}</div>
+              <SearchTrace events={progress} outcome="running" startedAt={startedAt} />
             </div>
           </div>
         ) : null}
@@ -200,23 +308,32 @@ export function ChatPanel({ onSearch, onLocate, onShowAll }: ChatPanelProps) {
 
       <form className="chat-composer" onSubmit={handleSubmit}>
         <label>
-          <span className="sr-only">Ask about shipments</span>
+          <span className="sr-only">배송 질문 입력</span>
           <input
             value={input}
             onChange={(event) => setInput(event.target.value)}
-            placeholder="Ask about shipments"
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && event.nativeEvent.isComposing) {
+                event.preventDefault()
+              }
+            }}
+            placeholder="배송에 관해 질문해 주세요"
             maxLength={300}
             disabled={searching}
           />
         </label>
-        <button
+        {searching ? (
+          <button type="button" aria-label="요청 중단" title="요청 중단" onClick={() => activeRequest.current?.abort()}>
+            <Square size={17} />
+          </button>
+        ) : <button
           type="submit"
-          aria-label="Send message"
-          title="Send"
+          aria-label="메시지 보내기"
+          title="보내기"
           disabled={input.trim().length < 2 || searching}
         >
           <Send size={17} />
-        </button>
+        </button>}
       </form>
     </aside>
   )

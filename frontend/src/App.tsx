@@ -25,6 +25,7 @@ import { ShipmentMap } from './components/ShipmentMap'
 import type {
   DatabaseCapabilities,
   SearchResponse,
+  SearchProgress,
   Shipment,
   ShipmentStats,
   ShipmentStatus,
@@ -41,6 +42,8 @@ function App() {
   const [capabilities, setCapabilities] =
     useState<DatabaseCapabilities | null>(null)
   const [selected, setSelected] = useState<Shipment | null>(null)
+  const [locateRequest, setLocateRequest] = useState(0)
+  const [locating, setLocating] = useState(false)
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState<StatusFilter>('all')
   const [mobileView, setMobileView] = useState<MobileView>('map')
@@ -117,15 +120,26 @@ function App() {
     return matchesStatus && (!deferredSearch || haystack.includes(deferredSearch))
   })
 
-  const mapSelection = selected
-    ? visibleShipments.find(
-        (shipment) => shipment.shipment_number === selected.shipment_number,
-      ) ?? null
-    : null
+  const selectionOutsideResults = selected !== null && !visibleShipments.some(
+    (shipment) => shipment.shipment_number === selected.shipment_number,
+  )
 
   function selectShipment(shipment: Shipment, revealMap = false) {
     setSelected(shipment)
+    setLocating(false)
     if (revealMap) setMobileView('map')
+  }
+
+  function locateShipment(shipment: Shipment) {
+    setSelected(shipment)
+    setLocating(true)
+    setLocateRequest((current) => current + 1)
+    setMobileView('map')
+  }
+
+  function clearSelection() {
+    setSelected(null)
+    setLocating(false)
   }
 
   function showAllShipments() {
@@ -134,18 +148,26 @@ function App() {
       setSearch('')
       setStatus('all')
       setSelected(null)
+      setLocating(false)
     })
   }
 
-  async function runSemanticSearch(query: string): Promise<SearchResponse> {
+  async function runSemanticSearch(
+    query: string, onProgress: (event: SearchProgress) => void, signal: AbortSignal,
+  ): Promise<SearchResponse> {
     const result = await searchShipments(
       query,
       status === 'all' ? null : status,
+      onProgress,
+      signal,
     )
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
+    if (result.search_mode === 'not_searched') return result
     startTransition(() => {
       setSemanticResults(result.shipments)
       setSearch('')
-      setSelected(result.shipments[0] ?? null)
+      setSelected(null)
+      setLocating(false)
     })
     return result
   }
@@ -207,7 +229,7 @@ function App() {
         <ShipmentList
           shipments={visibleShipments}
           total={visibleShipments.length}
-          selectedNumber={mapSelection?.shipment_number ?? null}
+          selectedNumber={selected?.shipment_number ?? null}
           search={search}
           status={status}
           loading={loading}
@@ -243,20 +265,24 @@ function App() {
           </div>
           <ShipmentMap
             shipments={visibleShipments}
-            selected={mapSelection}
+            selected={selected}
+            locateRequest={locating ? locateRequest : null}
             onSelect={(shipment) => selectShipment(shipment)}
           />
-          {mapSelection ? (
+          {selected ? (
             <ShipmentDetail
-              shipment={mapSelection}
-              onClose={() => setSelected(null)}
+              shipment={selected}
+              outsideResults={selectionOutsideResults}
+              onClose={clearSelection}
             />
           ) : null}
         </section>
 
         <ChatPanel
           onSearch={runSemanticSearch}
-          onLocate={(shipment) => selectShipment(shipment, true)}
+          selectedNumber={selected?.shipment_number ?? null}
+          onSelect={(shipment) => selectShipment(shipment, true)}
+          onLocate={locateShipment}
           onShowAll={showAllShipments}
         />
       </main>
@@ -284,7 +310,7 @@ function App() {
           onClick={() => setMobileView('assistant')}
         >
           <Bot size={19} />
-          Assistant
+          AI 도우미
         </button>
       </nav>
     </div>

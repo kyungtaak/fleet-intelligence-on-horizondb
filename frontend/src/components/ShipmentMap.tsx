@@ -1,4 +1,5 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
+import type { RefObject } from 'react'
 import L from 'leaflet'
 import {
   CircleMarker,
@@ -16,6 +17,7 @@ import { STATUS_COLORS, STATUS_LABELS } from '../shipmentStatus'
 interface ShipmentMapProps {
   shipments: Shipment[]
   selected: Shipment | null
+  locateRequest: number | null
   onSelect: (shipment: Shipment) => void
 }
 
@@ -29,25 +31,62 @@ function markerIcon(shipment: Shipment) {
   })
 }
 
-function FitVisibleShipments({ shipments }: { shipments: Shipment[] }) {
+function MapViewport({ shipments, selected, locateRequest, selectedMarker }: Omit<ShipmentMapProps, 'onSelect'> & { selectedMarker: RefObject<L.Marker | null> }) {
   const map = useMap()
+  const previousView = useRef('')
+  const previousLocate = useRef<number | null>(null)
+  const previousSize = useRef('')
+  const positions = JSON.stringify(shipments.map((shipment) => [
+    shipment.current_position.latitude, shipment.current_position.longitude,
+  ]))
+  const focusLatitude = locateRequest !== null && selected ? selected.current_position.latitude : null
+  const focusLongitude = locateRequest !== null && selected ? selected.current_position.longitude : null
+  const hasSelection = selected !== null
 
   useEffect(() => {
-    if (shipments.length === 0) return
-    if (shipments.length === 1) {
-      const point = shipments[0].current_position
-      map.flyTo([point.latitude, point.longitude], 5, { duration: 0.65 })
-      return
+    const points: [number, number][] = JSON.parse(positions)
+    const focus = focusLatitude !== null && focusLongitude !== null
+      ? { latitude: focusLatitude, longitude: focusLongitude } : null
+    const key = positions
+    if (!hasSelection && previousLocate.current !== null) {
+      previousView.current = ''
+      previousLocate.current = null
     }
-
-    const bounds = L.latLngBounds(
-      shipments.map((shipment) => [
-        shipment.current_position.latitude,
-        shipment.current_position.longitude,
-      ]),
-    )
-    map.fitBounds(bounds, { padding: [44, 44], maxZoom: 5, animate: true })
-  }, [map, shipments])
+    const openSelectedPopup = () => selectedMarker.current?.openPopup()
+    function updateView(resized = false) {
+      if (!map.getContainer().clientWidth || !map.getContainer().clientHeight) {
+        map.stop()
+        return
+      }
+      if (!resized && (focus ? previousLocate.current === locateRequest : previousView.current === key)) return
+      previousView.current = key
+      map.stop()
+      map.invalidateSize({ pan: false })
+      if (focus) {
+        previousLocate.current = locateRequest
+        map.off('moveend', openSelectedPopup)
+        map.once('moveend', openSelectedPopup)
+        map.flyTo([focus.latitude, focus.longitude], 5, { duration: 0.65 })
+      } else if (points.length === 1) {
+        map.flyTo(points[0], 5, { duration: 0.65 })
+      } else if (points.length > 1) {
+        map.fitBounds(L.latLngBounds(points), { padding: [44, 44], maxZoom: 5, animate: true })
+      }
+    }
+    updateView()
+    const observer = new ResizeObserver(() => {
+      const container = map.getContainer()
+      const size = `${container.clientWidth}:${container.clientHeight}`
+      if (previousSize.current === size) return
+      previousSize.current = size
+      updateView(true)
+    })
+    observer.observe(map.getContainer())
+    return () => {
+      observer.disconnect()
+      map.off('moveend', openSelectedPopup)
+    }
+  }, [map, positions, focusLatitude, focusLongitude, hasSelection, locateRequest, selectedMarker])
 
   return null
 }
@@ -55,8 +94,13 @@ function FitVisibleShipments({ shipments }: { shipments: Shipment[] }) {
 export function ShipmentMap({
   shipments,
   selected,
+  locateRequest,
   onSelect,
 }: ShipmentMapProps) {
+  const selectedMarker = useRef<L.Marker | null>(null)
+  const outsideResults = selected && !shipments.some((shipment) => shipment.id === selected.id)
+  const mapShipments = outsideResults ? [...shipments, selected] : shipments
+
   const selectedRoute: [number, number][] | null = selected
     ? [
         [selected.origin.latitude, selected.origin.longitude],
@@ -83,7 +127,7 @@ export function ShipmentMap({
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
       />
-      <FitVisibleShipments shipments={shipments} />
+      <MapViewport shipments={shipments} selected={selected} locateRequest={locateRequest} selectedMarker={selectedMarker} />
 
       {selected && selectedRoute ? (
         <>
@@ -120,9 +164,11 @@ export function ShipmentMap({
         </>
       ) : null}
 
-      {shipments.map((shipment) => (
+      {mapShipments.map((shipment) => (
         <Marker
           key={shipment.id}
+          title={shipment.shipment_number}
+          ref={selected?.id === shipment.id ? selectedMarker : undefined}
           position={[
             shipment.current_position.latitude,
             shipment.current_position.longitude,
@@ -133,11 +179,12 @@ export function ShipmentMap({
           }
           eventHandlers={{ click: () => onSelect(shipment) }}
         >
-          <Popup>
+          <Popup autoPan={false}>
             <div className="map-popup">
               <strong>{shipment.shipment_number}</strong>
               <span>{shipment.title}</span>
               <small>{shipment.current_location_name}</small>
+              {outsideResults && selected?.id === shipment.id ? <small>현재 검색 결과 외 배송</small> : null}
               <b style={{ color: STATUS_COLORS[shipment.status] }}>
                 {STATUS_LABELS[shipment.status]}
               </b>

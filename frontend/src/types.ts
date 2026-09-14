@@ -60,9 +60,41 @@ export interface ShipmentStats {
 
 export interface SearchResponse {
   query: string
-  search_mode: 'diskann_cosine'
+  search_mode: 'sql' | 'gis' | 'diskann_cosine' | 'hybrid' | 'not_searched'
   shipments: Shipment[]
   answer: string
   agent_framework: true
   chat_model: string
+  has_more: boolean
+  applied_filters: {
+    cargo_query: string | null
+    status: ShipmentStatus | null
+    shipment_number: string | null
+    origin_region: string | null
+    destination_region: string | null
+    origin_name: string | null
+    destination_name: string | null
+    nearby_location: string | null
+    position_field: 'origin' | 'destination' | 'current'
+    radius_km: number | null
+  } | null
+}
+
+export interface SearchProgress {
+  type: 'progress'
+  request_id: string
+  sequence: number
+  elapsed_ms: number
+  stage: string
+  message: string
+  sql?: string
+  parameters?: unknown[]
+  filters?: Record<string, unknown>
+  embedding_input?: string
+  deployment?: string
+  dimensions?: number
+  fetched_count?: number
+  returned_count?: number
+  has_more?: boolean
+  duration_ms?: number
 }

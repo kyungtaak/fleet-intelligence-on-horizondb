@@ -270,6 +270,7 @@ def test_setup_invalidates_vectors_only_when_needed(
     with (
         patch("app.setup_database.psycopg.connect") as connect,
         patch("app.setup_database.apply_schema"),
+        patch("app.setup_database.load_region_boundaries") as load_regions,
         patch("app.setup_database.seed_shipments"),
         patch("app.setup_database.configure_embeddings", return_value=configuration_changed),
         patch("app.setup_database.backfill_embeddings"),
@@ -277,6 +278,7 @@ def test_setup_invalidates_vectors_only_when_needed(
     ):
         result = setup_database(live_settings, force_embeddings=force)
         connection = connect.return_value.__enter__.return_value
+        load_regions.assert_called_once_with(connection)
         statements = [call.args[0] for call in connection.execute.call_args_list]
         assert ("UPDATE horizon_ship.shipments SET embedding = NULL;" in statements) is cleared
         assert result.primary_index_ready

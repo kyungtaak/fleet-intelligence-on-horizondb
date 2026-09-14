@@ -1,6 +1,8 @@
 from collections.abc import Mapping
+from time import monotonic
 from typing import Any, Protocol
 
+from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -15,10 +17,30 @@ from app.models import (
     Coordinate,
     DatabaseCapabilities,
     Shipment,
+    ShipmentFilters,
+    ShipmentSearchResult,
     ShipmentStats,
     ShipmentStatus,
     StatusCount,
 )
+from app.progress import report_progress
+from app.region_boundaries import REGION_NAMES
+from app.search_locations import LOCATION_COORDINATES, validate_filters
+
+DISKANN_SESSION_SQL = """
+SET SESSION diskann.iterative_search TO 'strict_order';
+SET SESSION diskann.enable_filter_hook TO 'true';
+SET SESSION diskann.selectivity_min TO '0.0';
+SET SESSION diskann.selectivity_threshold TO '1.0';
+SET SESSION diskann.filtering_beta TO 0.85;
+SET SESSION diskann.l_value_is TO 300;
+"""
+
+
+async def configure_search_connection(connection: AsyncConnection[Any]) -> None:
+    async with connection.transaction():
+        await connection.execute(DISKANN_SESSION_SQL, prepare=False)
+
 
 _SHIPMENT_COLUMNS = """
 	s.id,
@@ -57,6 +79,10 @@ class ShipmentRepository(Protocol):
         status: ShipmentStatus | None,
         limit: int,
     ) -> list[Shipment]: ...
+
+    async def search_shipments(
+        self, filters: ShipmentFilters, limit: int,
+    ) -> ShipmentSearchResult: ...
 
     async def get_shipment(self, shipment_number: str) -> Shipment | None: ...
 
@@ -108,6 +134,7 @@ class PostgresShipmentRepository:
             min_size=settings.database_pool_min_size,
             max_size=settings.database_pool_max_size,
             open=False,
+            configure=configure_search_connection,
             kwargs={"row_factory": dict_row},
         )
         self._connect_timeout = settings.database_connect_timeout_seconds
@@ -117,6 +144,13 @@ class PostgresShipmentRepository:
     async def open(self) -> None:
         await self._pool.open(wait=True, timeout=self._connect_timeout)
         await self._validate_search_readiness()
+        async with self._pool.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT name FROM horizon_ship.region_boundaries;"
+            )
+            rows = await cursor.fetchall()
+        if set(REGION_NAMES) - {row["name"] for row in rows}:
+            raise RuntimeError("Region boundaries are incomplete; run python -m app.region_boundaries")
 
     async def close(self) -> None:
         await self._pool.close()
@@ -200,42 +234,116 @@ ORDER BY s.shipment_number;
         status: ShipmentStatus | None,
         limit: int,
     ) -> list[Shipment]:
-        async with async_embedding_client(self._settings) as client:
-            response = await client.embeddings.create(
-                model=self._settings.azure_embed_deployment,
-                input=[query],
-                dimensions=EMBEDDING_DIMENSIONS,
-                encoding_format="float",
+        return await self._search_rows(ShipmentFilters(cargo_query=query, status=status), limit)
+
+    async def search_shipments(
+        self, filters: ShipmentFilters, limit: int,
+    ) -> ShipmentSearchResult:
+        validate_filters(filters)
+        rows = await self._search_rows(filters, limit + 1)
+        exact_conditions = any((
+            filters.status, filters.shipment_number, filters.origin_region,
+            filters.destination_region, filters.origin_name, filters.destination_name,
+            filters.nearby_location,
+        ))
+        mode = (
+            "hybrid" if filters.cargo_query and exact_conditions
+            else "diskann_cosine" if filters.cargo_query
+            else "gis" if any((filters.nearby_location, filters.origin_region, filters.destination_region))
+            else "sql"
+        )
+        return ShipmentSearchResult(
+            shipments=rows[:limit], search_mode=mode,
+            has_more=len(rows) > limit, applied_filters=filters,
+        )
+
+    async def _search_rows(self, filters: ShipmentFilters, limit: int) -> list[Shipment]:
+        validate_filters(filters)
+        parameters: list[Any] = []
+        vector_cte = ""
+        vector_join = ""
+        similarity = "NULL::double precision"
+        ordering = "s.shipment_number"
+        if filters.cargo_query:
+            report_progress(
+                "embedding", "화물 검색어를 임베딩 API에 전달하고 있습니다.",
+                embedding_input=filters.cargo_query,
+                deployment=self._settings.azure_embed_deployment,
             )
-        vector = serialize_embeddings(response, 1)[0]
+            async with async_embedding_client(self._settings) as client:
+                response = await client.embeddings.create(
+                    model=self._settings.azure_embed_deployment,
+                    input=[filters.cargo_query],
+                    dimensions=EMBEDDING_DIMENSIONS,
+                    encoding_format="float",
+                )
+            parameters.append(serialize_embeddings(response, 1)[0])
+            report_progress("embedding_ready", "검색어 벡터를 생성했습니다.", dimensions=EMBEDDING_DIMENSIONS)
+            vector_cte = "WITH query_vector AS (SELECT %s::public.vector(1536) AS embedding)"
+            vector_join = "CROSS JOIN query_vector"
+            similarity = "1 - (s.embedding <=> query_vector.embedding)"
+            ordering = "s.embedding <=> query_vector.embedding"
+
+        status_value = filters.status.value if filters.status else None
+        conditions = ["(%s::text IS NULL OR s.status = %s)"]
+        parameters.extend((status_value, status_value))
+        for column, value in (
+            ("shipment_number", filters.shipment_number),
+            ("origin_name", filters.origin_name),
+            ("destination_name", filters.destination_name),
+        ):
+            if value is not None:
+                conditions.append(f"s.{column} = %s")
+                parameters.append(value)
+        for column, region in (
+            ("origin_position", filters.origin_region),
+            ("destination_position", filters.destination_region),
+        ):
+            if region is not None:
+                conditions.append(
+                    "EXISTS (SELECT 1 FROM horizon_ship.region_boundaries AS region "
+                    f"WHERE region.name = %s AND public.ST_Covers(region.boundary, s.{column}))"
+                )
+                parameters.append(region)
+        if filters.nearby_location:
+            coordinate = LOCATION_COORDINATES[filters.nearby_location]
+            position = {
+                "origin": "origin_position", "destination": "destination_position",
+                "current": "current_position",
+            }[filters.position_field]
+            conditions.append(
+                f"public.ST_DWithin(s.{position}::public.geography, "
+                "public.ST_SetSRID(public.ST_MakePoint(%s, %s), 4326)::public.geography, %s)"
+            )
+            parameters.extend((coordinate.longitude, coordinate.latitude, filters.radius_km * 1000))
+        parameters.append(limit)
         statement = f"""
-WITH query_vector AS (
-	SELECT %s::public.vector(1536) AS embedding
-)
+{vector_cte}
 SELECT
 {_SHIPMENT_COLUMNS},
-	1 - (s.embedding <=> query_vector.embedding) AS similarity
+    {similarity} AS similarity
 FROM horizon_ship.shipments AS s
-CROSS JOIN query_vector
-WHERE (%s::text IS NULL OR s.status = %s)
-ORDER BY s.embedding <=> query_vector.embedding
+{vector_join}
+WHERE {' AND '.join(conditions)}
+ORDER BY {ordering}
 LIMIT %s;
 """
-        parameters: list[Any] = [vector]
-        status_value = status.value if status else None
-        parameters.extend((status_value, status_value, limit))
+        report_progress("db_connect", "DB 연결 풀에서 연결을 확보하고 있습니다.")
         async with self._pool.connection() as connection, connection.transaction():
-            for setting in (
-                "SET LOCAL diskann.iterative_search TO 'strict_order'",
-                "SET LOCAL diskann.enable_filter_hook TO 'true'",
-                "SET LOCAL diskann.selectivity_min TO '0.0'",
-                "SET LOCAL diskann.selectivity_threshold TO '1.0'",
-                "SET LOCAL diskann.filtering_beta TO 0.85",
-                "SET LOCAL diskann.l_value_is TO 300",
-            ):
-                await connection.execute(setting)
+            visible_parameters = list(parameters)
+            if filters.cargo_query:
+                visible_parameters[0] = f"[vector: {EMBEDDING_DIMENSIONS} dimensions; omitted]"
+            report_progress(
+                "db_query", "배송 조회 SQL을 실행하고 있습니다.",
+                sql=statement, parameters=visible_parameters,
+            )
+            query_started = monotonic()
             cursor = await connection.execute(statement, parameters)
             rows = await cursor.fetchall()
+            report_progress(
+                "db_result", "DB 조회 결과를 받았습니다.", fetched_count=len(rows),
+                duration_ms=round((monotonic() - query_started) * 1000),
+            )
         return [_row_to_shipment(row) for row in rows]
 
     async def get_shipment(self, shipment_number: str) -> Shipment | None:

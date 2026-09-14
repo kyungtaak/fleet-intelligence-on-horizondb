@@ -1,10 +1,12 @@
-from unittest.mock import Mock
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from app.agent import ShipmentAgent
 from app.config import Settings
-from app.models import SearchRequest
+from app.models import SearchRequest, ShipmentFilters, ShipmentSearchResult
 
 
 @pytest.mark.parametrize("api_key", [None, "", "test-key"])
@@ -60,4 +62,68 @@ async def test_agent_framework_tool_drives_semantic_results(
     assert result.answer.startswith("SHIP-0014")
     assert fake_agent_client.agent_options is not None
     assert fake_agent_client.agent_options["name"] == "HorizonShipAgent"
+    instructions = fake_agent_client.agent_options["instructions"]
+    assert "Always answer in Korean" in instructions
+    assert "Format answers in Markdown" in instructions
+    assert "only on the tool output" in instructions
     assert len(fake_agent_client.agent_options["tools"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filters", [
+    {"status": "delayed"},
+    {"origin_region": "Asia"},
+    {"origin_region": "Asia", "cargo_query": "medical supplies"},
+    {"nearby_location": "Busan, South Korea", "radius_km": 100},
+])
+async def test_agent_preserves_filters_and_empty_results(live_settings, fake_repository, filters):
+    effective = ShipmentFilters(**filters)
+    fake_repository.search_shipments = AsyncMock(return_value=ShipmentSearchResult(
+        shipments=[], search_mode="sql", applied_filters=effective,
+    ))
+    fake_repository.semantic_search = AsyncMock()
+
+    class Runner:
+        def __init__(self, shipment_tool):
+            self.shipment_tool = shipment_tool
+
+        async def run(self, prompt):
+            payload = await self.shipment_tool.invoke(arguments={"filters": filters})
+            assert json.loads(payload[0].text)["matches"] == []
+            return SimpleNamespace(text="조건에 맞는 배송이 없습니다.")
+
+    client = Mock()
+    client.as_agent.side_effect = lambda **options: Runner(options["tools"][0])
+    agent = ShipmentAgent(live_settings, fake_repository, client=client)
+    result = await agent.run(SearchRequest(query="배송 조회"))
+    assert result.shipments == []
+    assert result.applied_filters == effective
+    fake_repository.search_shipments.assert_awaited_once_with(filters=effective, limit=8)
+    fake_repository.semantic_search.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_agent_clarification_does_not_search(live_settings, fake_repository):
+    fake_repository.search_shipments = AsyncMock()
+    runner = Mock(run=AsyncMock(return_value=SimpleNamespace(text="어느 지역인가요?")))
+    client = Mock()
+    client.as_agent.return_value = runner
+    result = await ShipmentAgent(live_settings, fake_repository, client=client).run(
+        SearchRequest(query="가까운 배송"),
+    )
+    assert result.search_mode == "not_searched"
+    assert result.applied_filters is None
+    fake_repository.search_shipments.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ui_status_remains_required(live_settings, fake_repository, fake_agent_client):
+    fake_repository.search_shipments = AsyncMock(return_value=ShipmentSearchResult(
+        shipments=fake_repository._shipments[:1], search_mode="hybrid",
+        applied_filters=ShipmentFilters(status="delayed", cargo_query="medical"),
+    ))
+    result = await ShipmentAgent(live_settings, fake_repository, client=fake_agent_client).run(
+        SearchRequest(query="medical", status="delayed"),
+    )
+    assert fake_repository.search_shipments.await_args.kwargs["filters"].status == "delayed"
+    assert result.applied_filters.status == "delayed"

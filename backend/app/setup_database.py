@@ -14,6 +14,7 @@ from app.embeddings import (
     serialize_embeddings,
 )
 from app.models import Shipment
+from app.region_boundaries import load_region_boundaries
 from app.sample_data import build_sample_shipments
 
 SCHEMA_PATH = Path(__file__).parents[2] / "database" / "schema.sql"
@@ -236,6 +237,7 @@ def setup_database(
 
     with psycopg.connect(database_conninfo) as connection:
         apply_schema(connection)
+        load_region_boundaries(connection)
         seed_shipments(connection)
 
         configuration_changed = configure_embeddings(connection, settings)

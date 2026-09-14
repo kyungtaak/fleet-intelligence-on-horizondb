@@ -3,7 +3,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ShipmentStatus(StrEnum):
@@ -43,16 +43,44 @@ class SearchRequest(BaseModel):
     limit: int = Field(default=8, ge=1, le=24)
 
 
+class ShipmentFilters(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cargo_query: str | None = Field(default=None, min_length=2, max_length=300)
+    status: ShipmentStatus | None = None
+    shipment_number: str | None = Field(default=None, pattern=r"^SHIP-\d{4}$")
+    origin_region: str | None = None
+    destination_region: str | None = None
+    origin_name: str | None = None
+    destination_name: str | None = None
+    nearby_location: str | None = None
+    position_field: Literal["origin", "destination", "current"] = "current"
+    radius_km: float | None = Field(default=None, gt=0, le=20000)
+
+
+SearchMode = Literal["sql", "gis", "diskann_cosine", "hybrid"]
+
+
+class ShipmentSearchResult(BaseModel):
+    shipments: list[Shipment]
+    search_mode: SearchMode
+    has_more: bool = False
+    applied_filters: ShipmentFilters
+
+
 class SearchResponse(BaseModel):
     query: str
-    search_mode: Literal["diskann_cosine"]
+    search_mode: SearchMode
     shipments: list[Shipment]
 
 
 class ChatResponse(SearchResponse):
+    search_mode: SearchMode | Literal["not_searched"]
     answer: str
     agent_framework: Literal[True] = True
     chat_model: str
+    has_more: bool = False
+    applied_filters: ShipmentFilters | None = None
 
 
 class StatusCount(BaseModel):

@@ -4,6 +4,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from app.agent import AgentClient, ShipmentAgent
 from app.config import Settings, get_settings
@@ -16,6 +17,7 @@ from app.models import (
     ShipmentStats,
     ShipmentStatus,
 )
+from app.progress import stream_chat
 from app.repository import PostgresShipmentRepository, ShipmentRepository
 
 
@@ -143,6 +145,15 @@ def create_app(
     ) -> ChatResponse:
         shipment_agent: ShipmentAgent = http_request.app.state.shipment_agent
         return await shipment_agent.run(request)
+
+    @app.post("/api/chat/stream")
+    async def agent_chat_stream(request: SearchRequest, http_request: Request) -> StreamingResponse:
+        shipment_agent: ShipmentAgent = http_request.app.state.shipment_agent
+        return StreamingResponse(
+            stream_chat(lambda: shipment_agent.run(request)),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
 
     return app
 
