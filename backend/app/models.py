@@ -3,7 +3,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ShipmentStatus(StrEnum):
@@ -36,6 +36,48 @@ class Shipment(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     similarity: float | None = Field(default=None, ge=-1, le=1)
     remaining_distance_km: float | None = Field(default=None, ge=0)
+
+
+class ShipmentCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    shipment_number: str = Field(pattern=r"^SHIP-\d{4}$")
+    title: str = Field(min_length=1, max_length=300)
+    description: str = Field(min_length=1, max_length=2000)
+    origin_name: str = Field(min_length=1, max_length=300)
+    origin: Coordinate
+    destination_name: str = Field(min_length=1, max_length=300)
+    destination: Coordinate
+    current_location_name: str = Field(min_length=1, max_length=300)
+    current_position: Coordinate
+    status: ShipmentStatus
+    eta: date | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ShipmentUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1, max_length=300)
+    description: str | None = Field(default=None, min_length=1, max_length=2000)
+    origin_name: str | None = Field(default=None, min_length=1, max_length=300)
+    origin: Coordinate | None = None
+    destination_name: str | None = Field(default=None, min_length=1, max_length=300)
+    destination: Coordinate | None = None
+    current_location_name: str | None = Field(default=None, min_length=1, max_length=300)
+    current_position: Coordinate | None = None
+    status: ShipmentStatus | None = None
+    eta: date | None = None
+    metadata: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_patch(self) -> "ShipmentUpdate":
+        if not self.model_fields_set:
+            raise ValueError("At least one shipment field is required")
+        for field_name in self.model_fields_set - {"eta"}:
+            if getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} cannot be null")
+        return self
 
 
 class SearchRequest(BaseModel):

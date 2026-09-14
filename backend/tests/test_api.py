@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
-from app.models import ShipmentFilters, ShipmentStatus
+from app.models import ShipmentCreate, ShipmentFilters, ShipmentStatus, ShipmentUpdate
 from app.progress import report_progress, stream_chat
 from app.repository import PostgresShipmentRepository
 from app.search_locations import LOCATION_COORDINATES
@@ -153,6 +153,98 @@ def test_unknown_shipment_and_invalid_search_are_rejected(
     assert invalid.status_code == 422
 
 
+def test_create_and_update_shipment_endpoints(
+    live_settings,
+    fake_repository,
+    fake_agent_client,
+) -> None:
+    payload = {
+        "shipment_number": "SHIP-9001",
+        "title": "Laboratory Supplies",
+        "description": "Diagnostic equipment for a regional laboratory.",
+        "origin_name": "Seoul, South Korea",
+        "origin": {"latitude": 37.5665, "longitude": 126.978},
+        "destination_name": "Tokyo, Japan",
+        "destination": {"latitude": 35.6895, "longitude": 139.6917},
+        "current_location_name": "Busan, South Korea",
+        "current_position": {"latitude": 35.1796, "longitude": 129.0756},
+        "status": "in_transit",
+        "eta": "2026-10-01",
+        "metadata": {"tags": ["medical"]},
+    }
+    with make_client(live_settings, fake_repository, fake_agent_client) as client:
+        created = client.post("/api/shipments", json=payload)
+        duplicate = client.post("/api/shipments", json=payload)
+        updated = client.patch(
+            "/api/shipments/ship-9001",
+            json={"title": "Updated Laboratory Supplies", "eta": None},
+        )
+        fetched = client.get("/api/shipments/SHIP-9001")
+        missing = client.patch("/api/shipments/SHIP-9999", json={"status": "delayed"})
+        empty = client.patch("/api/shipments/SHIP-9001", json={})
+
+    assert created.status_code == 201
+    assert created.json()["shipment_number"] == "SHIP-9001"
+    assert duplicate.status_code == 409
+    assert updated.status_code == 200
+    assert updated.json()["title"] == "Updated Laboratory Supplies"
+    assert updated.json()["eta"] is None
+    assert fetched.json() == updated.json()
+    assert missing.status_code == 404
+    assert empty.status_code == 422
+
+
+async def test_repository_writes_use_postgis_and_fixed_patch_fields(
+    live_settings,
+    fake_repository,
+) -> None:
+    sample = fake_repository._shipments[0]
+    create_request = ShipmentCreate.model_validate(sample.model_dump(exclude={
+        "id", "updated_at", "similarity", "remaining_distance_km",
+    }))
+    with patch("app.repository.AsyncConnectionPool") as pool_factory:
+        connection = MagicMock()
+        cursor = AsyncMock()
+        cursor.fetchone.return_value = {
+            "id": sample.id,
+            "shipment_number": sample.shipment_number,
+            "title": sample.title,
+            "description": sample.description,
+            "origin_name": sample.origin_name,
+            "origin_latitude": sample.origin.latitude,
+            "origin_longitude": sample.origin.longitude,
+            "destination_name": sample.destination_name,
+            "destination_latitude": sample.destination.latitude,
+            "destination_longitude": sample.destination.longitude,
+            "current_location_name": sample.current_location_name,
+            "current_latitude": sample.current_position.latitude,
+            "current_longitude": sample.current_position.longitude,
+            "status": sample.status.value,
+            "eta": sample.eta,
+            "updated_at": sample.updated_at,
+            "metadata": sample.metadata,
+        }
+        connection.execute = AsyncMock(return_value=cursor)
+        pool_factory.return_value.connection.return_value.__aenter__.return_value = connection
+        repository = PostgresShipmentRepository(live_settings)
+
+        await repository.create_shipment(create_request)
+        create_sql, create_parameters = connection.execute.await_args.args
+        assert create_sql.count("ST_MakePoint") == 3
+        assert create_parameters[4:6] == (
+            sample.origin.longitude, sample.origin.latitude,
+        )
+
+        await repository.update_shipment(
+            sample.shipment_number,
+            ShipmentUpdate(current_position={"latitude": 1.25, "longitude": 2.5}),
+        )
+        patch_sql, patch_parameters = connection.execute.await_args.args
+        assert "current_position = public.ST_SetSRID" in patch_sql.as_string()
+        assert "title =" not in patch_sql.as_string()
+        assert patch_parameters == [2.5, 1.25, sample.shipment_number]
+
+
 def test_startup_rejects_missing_live_configuration() -> None:
     app = create_app(settings=Settings(_env_file=None, azure_openai_endpoint=""))
 
@@ -193,7 +285,9 @@ async def test_repository_generates_query_vector_in_backend(live_settings: Setti
         )
         statement, parameters = connection.execute.call_args.args
         assert "azure_openai.create_embeddings" not in statement
-        assert "ORDER BY s.embedding <=> query_vector.embedding" in statement
+        assert "JOIN horizon_ship.shipment_embeddings AS se" in statement
+        assert "sej.content_version = se.content_version" in statement
+        assert "ORDER BY se.embedding <=> query_vector.embedding" in statement
         assert json.loads(parameters[0]) == [0.1] * 1536
         assert parameters[1:] == ["delayed", "delayed", 5]
         assert connection.execute.await_count == 1
@@ -388,7 +482,9 @@ async def test_hybrid_search_keeps_exact_conditions_in_sql(live_settings):
         assert client.embeddings.create.await_args.kwargs["input"] == ["medical supplies"]
         statement, parameters = connection.execute.call_args.args
         assert "ST_Covers(region.boundary, s.origin_position)" in statement
-        assert "ORDER BY s.embedding <=> query_vector.embedding" in statement
+        assert "JOIN horizon_ship.shipment_embeddings AS se" in statement
+        assert "sej.content_version = se.content_version" in statement
+        assert "ORDER BY se.embedding <=> query_vector.embedding" in statement
         assert parameters[1:] == ["delayed", "delayed", "Asia", 9]
         events = progress.call_args_list
         assert all(event.args[0] != "db_setting" for event in events)

@@ -21,7 +21,16 @@ def test_schema_contains_horizon_embedding_contract() -> None:
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
 
     assert "CREATE TABLE IF NOT EXISTS horizon_ship.embedding_configuration" in schema
-    assert "CREATE EXTENSION IF NOT EXISTS azure_ai" not in schema
+    assert "CREATE EXTENSION IF NOT EXISTS azure_ai" in schema
+    assert "CREATE TABLE IF NOT EXISTS horizon_ship.shipment_embedding_jobs" in schema
+    assert "CREATE TABLE IF NOT EXISTS horizon_ship.shipment_embeddings" in schema
+    assert "CREATE OR REPLACE FUNCTION horizon_ship.enqueue_shipment_embedding" in schema
+    assert "shipment_embedding_jobs AS existing_job" in schema
+    assert "content_version = existing_job.content_version + 1" in schema
+    shipments_definition = schema.split(
+        "CREATE TABLE IF NOT EXISTS horizon_ship.shipments", 1
+    )[1].split("CREATE TABLE IF NOT EXISTS horizon_ship.shipment_embedding_jobs", 1)[0]
+    assert "embedding public.vector(1536)" not in shipments_definition
     assert "embedding public.vector(1536)" in schema
     assert "CREATE OR REPLACE FUNCTION horizon_ship.demo_embedding" not in schema
     assert "demo_embedding public.vector" not in schema

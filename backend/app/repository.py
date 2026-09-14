@@ -2,8 +2,9 @@ from collections.abc import Mapping
 from time import monotonic
 from typing import Any, Protocol
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, errors, sql
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from app.config import Settings
@@ -17,10 +18,12 @@ from app.models import (
     Coordinate,
     DatabaseCapabilities,
     Shipment,
+    ShipmentCreate,
     ShipmentFilters,
     ShipmentSearchResult,
     ShipmentStats,
     ShipmentStatus,
+    ShipmentUpdate,
     StatusCount,
 )
 from app.progress import report_progress
@@ -86,9 +89,19 @@ class ShipmentRepository(Protocol):
 
     async def get_shipment(self, shipment_number: str) -> Shipment | None: ...
 
+    async def create_shipment(self, shipment: ShipmentCreate) -> Shipment: ...
+
+    async def update_shipment(
+        self, shipment_number: str, shipment: ShipmentUpdate,
+    ) -> Shipment | None: ...
+
     async def stats(self) -> ShipmentStats: ...
 
     async def capabilities(self) -> DatabaseCapabilities: ...
+
+
+class ShipmentAlreadyExistsError(Exception):
+    pass
 
 
 def _row_to_shipment(row: Mapping[str, Any]) -> Shipment:
@@ -169,9 +182,11 @@ SELECT
         FROM horizon_ship.embedding_configuration
         WHERE singleton = true AND endpoint = %s AND deployment = %s AND dimensions = %s
     ) AS configuration_matches,
-	to_regclass('horizon_ship.shipments_embedding_diskann_idx') IS NOT NULL
+    to_regclass('horizon_ship.shipment_embeddings_diskann_idx') IS NOT NULL
 		AS index_ready
-FROM horizon_ship.shipments;
+FROM horizon_ship.shipments AS shipment
+LEFT JOIN horizon_ship.shipment_embeddings AS embedding
+    ON embedding.shipment_id = shipment.id;
 """
         async with self._pool.connection() as connection:
             cursor = await connection.execute(query, (
@@ -294,13 +309,21 @@ ORDER BY s.shipment_number;
             parameters.append(serialize_embeddings(response, 1)[0])
             report_progress("embedding_ready", "검색어 벡터를 생성했습니다.", dimensions=EMBEDDING_DIMENSIONS)
             vector_cte = "WITH query_vector AS (SELECT %s::public.vector(1536) AS embedding)"
-            vector_join = "CROSS JOIN query_vector"
-            similarity = "1 - (s.embedding <=> query_vector.embedding)"
-            ordering = "s.embedding <=> query_vector.embedding"
+            vector_join = """JOIN horizon_ship.shipment_embeddings AS se
+    ON se.shipment_id = s.id
+LEFT JOIN horizon_ship.shipment_embedding_jobs AS sej
+    ON sej.shipment_id = s.id
+CROSS JOIN query_vector"""
+            similarity = "1 - (se.embedding <=> query_vector.embedding)"
+            ordering = "se.embedding <=> query_vector.embedding"
 
         status_value = filters.status.value if filters.status else None
         conditions = ["(%s::text IS NULL OR s.status = %s)"]
         parameters.extend((status_value, status_value))
+        if filters.cargo_query:
+            conditions.append(
+                "(sej.shipment_id IS NULL OR sej.content_version = se.content_version)"
+            )
         if filters.sort_by == "destination_distance" and filters.status is None:
             conditions.append("s.status <> %s")
             parameters.append(ShipmentStatus.DELIVERED.value)
@@ -376,6 +399,118 @@ WHERE s.shipment_number = %s;
             row = await cursor.fetchone()
         return _row_to_shipment(row) if row else None
 
+    async def create_shipment(self, shipment: ShipmentCreate) -> Shipment:
+        query = f"""
+INSERT INTO horizon_ship.shipments AS s (
+    shipment_number,
+    title,
+    description,
+    origin_name,
+    origin_position,
+    destination_name,
+    destination_position,
+    current_location_name,
+    current_position,
+    status,
+    eta,
+    updated_at,
+    metadata
+)
+VALUES (
+    %s, %s, %s, %s,
+    public.ST_SetSRID(public.ST_MakePoint(%s, %s), 4326),
+    %s,
+    public.ST_SetSRID(public.ST_MakePoint(%s, %s), 4326),
+    %s,
+    public.ST_SetSRID(public.ST_MakePoint(%s, %s), 4326),
+    %s, %s, clock_timestamp(), %s
+)
+RETURNING
+{_SHIPMENT_COLUMNS};
+"""
+        parameters = (
+            shipment.shipment_number,
+            shipment.title,
+            shipment.description,
+            shipment.origin_name,
+            shipment.origin.longitude,
+            shipment.origin.latitude,
+            shipment.destination_name,
+            shipment.destination.longitude,
+            shipment.destination.latitude,
+            shipment.current_location_name,
+            shipment.current_position.longitude,
+            shipment.current_position.latitude,
+            shipment.status.value,
+            shipment.eta,
+            Jsonb(shipment.metadata),
+        )
+        try:
+            async with self._pool.connection() as connection, connection.transaction():
+                cursor = await connection.execute(query, parameters)
+                row = await cursor.fetchone()
+        except errors.UniqueViolation as exc:
+            raise ShipmentAlreadyExistsError(shipment.shipment_number) from exc
+        return _row_to_shipment(row)
+
+    async def update_shipment(
+        self,
+        shipment_number: str,
+        shipment: ShipmentUpdate,
+    ) -> Shipment | None:
+        assignment_sql = {
+            "title": sql.SQL("title = %s"),
+            "description": sql.SQL("description = %s"),
+            "origin_name": sql.SQL("origin_name = %s"),
+            "origin": sql.SQL(
+                "origin_position = public.ST_SetSRID(public.ST_MakePoint(%s, %s), 4326)"
+            ),
+            "destination_name": sql.SQL("destination_name = %s"),
+            "destination": sql.SQL(
+                "destination_position = public.ST_SetSRID(public.ST_MakePoint(%s, %s), 4326)"
+            ),
+            "current_location_name": sql.SQL("current_location_name = %s"),
+            "current_position": sql.SQL(
+                "current_position = public.ST_SetSRID(public.ST_MakePoint(%s, %s), 4326)"
+            ),
+            "status": sql.SQL("status = %s"),
+            "eta": sql.SQL("eta = %s"),
+            "metadata": sql.SQL("metadata = %s"),
+        }
+        field_names = [
+            field_name for field_name in assignment_sql
+            if field_name in shipment.model_fields_set
+        ]
+        assignments = [assignment_sql[field_name] for field_name in field_names]
+        parameters: list[Any] = []
+        for field_name in field_names:
+            value = getattr(shipment, field_name)
+            if isinstance(value, Coordinate):
+                parameters.extend((value.longitude, value.latitude))
+            elif isinstance(value, ShipmentStatus):
+                parameters.append(value.value)
+            elif field_name == "metadata":
+                parameters.append(Jsonb(value))
+            else:
+                parameters.append(value)
+        parameters.append(shipment_number)
+        statement = sql.SQL(
+            """
+UPDATE horizon_ship.shipments AS s
+SET {assignments}, updated_at = clock_timestamp()
+WHERE s.shipment_number = %s
+RETURNING
+{columns};
+"""
+        ).format(
+            assignments=sql.SQL(", ").join(assignments),
+            columns=sql.SQL(_SHIPMENT_COLUMNS),
+        )
+        async with self._pool.connection() as connection, connection.transaction():
+            cursor = await connection.execute(statement, parameters)
+            row = await cursor.fetchone()
+        return _row_to_shipment(row) if row else None
+
     async def stats(self) -> ShipmentStats:
         query = """
 SELECT status, count(*) AS count
@@ -412,8 +547,10 @@ SELECT
         SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'azure_ai'
     ) AS azure_ai_version,
     count(*) AS shipment_count,
-    count(embedding) AS azure_embedding_count
-FROM horizon_ship.shipments;
+    count(embedding.embedding) AS azure_embedding_count
+FROM horizon_ship.shipments AS shipment
+LEFT JOIN horizon_ship.shipment_embeddings AS embedding
+    ON embedding.shipment_id = shipment.id;
 """
         async with self._pool.connection() as connection:
             cursor = await connection.execute(query)
@@ -431,7 +568,7 @@ FROM horizon_ship.shipments;
             embedding_mode="azure_openai",
             embedding_model_alias=self._model_alias,
             detail=(
-                "Embeddings are generated by the backend using Azure OpenAI with "
-                "Entra ID or an externally configured API key."
+                "Query embeddings are generated by the backend; shipment embeddings "
+                "are maintained by the HorizonDB azure_ai pipeline."
             ),
         )

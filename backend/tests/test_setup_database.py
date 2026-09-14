@@ -11,15 +11,21 @@ from app.embeddings import (
     TOKEN_SCOPE,
     async_embedding_client,
     embedding_client,
+    model_registry_endpoint,
     openai_base_url,
     serialize_embeddings,
 )
 from app.sample_data import build_sample_shipments
 from app.setup_database import (
+    CREATE_PIPELINE_SQL,
     EMBEDDING_CONFIG_SQL,
+    PIPELINE_NAME,
+    PIPELINE_SINK_ACTION,
     PRIMARY_INDEX_SQL,
     backfill_embeddings,
+    configure_embedding_pipeline,
     configure_embeddings,
+    configure_pipeline_model,
     setup_database,
     shipment_parameters,
 )
@@ -109,6 +115,54 @@ def test_embedding_configuration_tracks_model_not_auth(api_key, current_deployme
         assert len(cursor.calls) == 2
 
 
+def test_pipeline_model_registration_binds_subscription_key(live_settings: Settings) -> None:
+    connection = MagicMock()
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchone.return_value = None
+
+    configure_pipeline_model(connection, live_settings)
+
+    registration_query, parameters = cursor.execute.call_args_list[-1].args
+    assert "model_registry.model_add" in registration_query
+    assert live_settings.azure_openai_key not in registration_query
+    assert parameters == (
+        live_settings.embedding_model_alias,
+        "https://example.openai.azure.com/",
+        live_settings.azure_embed_deployment,
+        live_settings.azure_embed_deployment,
+        "subscription-key",
+        live_settings.azure_openai_key,
+    )
+
+
+def test_pipeline_model_registration_requires_subscription_key(
+    live_settings: Settings,
+) -> None:
+    settings = live_settings.model_copy(update={"azure_openai_key": None})
+    with pytest.raises(RuntimeError, match="AZURE_OPENAI_KEY"):
+        configure_pipeline_model(MagicMock(), settings)
+
+
+def test_pipeline_creation_uses_incremental_job_source(live_settings: Settings) -> None:
+    connection = MagicMock()
+    connection.execute.return_value.fetchone.return_value = None
+
+    assert configure_embedding_pipeline(connection, live_settings) is True
+
+    create_call = next(
+        call for call in connection.execute.call_args_list
+        if call.args[0] == CREATE_PIPELINE_SQL
+    )
+    assert create_call.args[1] == (
+        PIPELINE_NAME,
+        live_settings.embedding_model_alias,
+        PIPELINE_SINK_ACTION,
+    )
+    assert "shipment_embedding_jobs" in CREATE_PIPELINE_SQL
+    assert "shipment_embeddings" in CREATE_PIPELINE_SQL
+    assert "ai.chunk" not in CREATE_PIPELINE_SQL
+
+
 def test_seed_parameters_use_postgis_longitude_latitude_order() -> None:
     shipment = build_sample_shipments()[0]
     parameters = shipment_parameters(shipment)
@@ -138,6 +192,9 @@ def test_primary_diskann_index_uses_spherical_quantization() -> None:
 def test_foundry_endpoint_normalization(suffix: str) -> None:
     assert openai_base_url("https://example.services.ai.azure.com" + suffix) == (
         "https://example.services.ai.azure.com/openai/v1/"
+    )
+    assert model_registry_endpoint("https://example.services.ai.azure.com" + suffix) == (
+        "https://example.services.ai.azure.com/"
     )
 
 
@@ -243,8 +300,10 @@ def test_backfill_batches_embeddings_and_binds_vectors(live_settings: Settings) 
         )
     statement, parameters = cursor.executemany.call_args.args
     assert "azure_openai.create_embeddings" not in statement
-    assert [(json.loads(vector)[0], row_id) for vector, row_id in parameters] == [
-        (0.1, "first"), (0.2, "second"),
+    assert "INSERT INTO horizon_ship.shipment_embeddings" in statement
+    assert [(input_text, json.loads(vector)[0], row_id)
+            for input_text, vector, row_id in parameters] == [
+        ("cargo one", 0.1, "first"), ("cargo two", 0.2, "second"),
     ]
 
 
@@ -270,17 +329,21 @@ def test_setup_invalidates_vectors_only_when_needed(
     with (
         patch("app.setup_database.psycopg.connect") as connect,
         patch("app.setup_database.apply_schema"),
+        patch("app.setup_database.configure_pipeline_model"),
         patch("app.setup_database.load_region_boundaries") as load_regions,
         patch("app.setup_database.seed_shipments"),
         patch("app.setup_database.configure_embeddings", return_value=configuration_changed),
+        patch("app.setup_database.migrate_legacy_embeddings"),
         patch("app.setup_database.backfill_embeddings"),
         patch("app.setup_database.database_counts", return_value=(24, 24)),
+        patch("app.setup_database.remove_legacy_embedding_column"),
+        patch("app.setup_database.configure_embedding_pipeline"),
     ):
         result = setup_database(live_settings, force_embeddings=force)
         connection = connect.return_value.__enter__.return_value
         load_regions.assert_called_once_with(connection)
         statements = [call.args[0] for call in connection.execute.call_args_list]
-        assert ("UPDATE horizon_ship.shipments SET embedding = NULL;" in statements) is cleared
+        assert ("DELETE FROM horizon_ship.shipment_embeddings;" in statements) is cleared
         assert result.primary_index_ready
         assert result.embedding_configuration_changed is configuration_changed
 

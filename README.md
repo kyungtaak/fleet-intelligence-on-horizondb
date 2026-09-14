@@ -9,7 +9,8 @@ HorizonShip은 배송 현황 조회, 지도 표시, 자연어 검색을 함께 �
 - PostGIS는 출발지, 도착지, 현재 배송 위치를 SRID 4326의 Point로 저장합니다.
   화면은 이 좌표를 Leaflet 세계 지도에 표시하며, 반경 검색은 `ST_DWithin`으로 검사합니다.
 - Azure OpenAI의 `text-embedding-3-small`은 화물명·설명·지명·상태·metadata를 합친 텍스트를 1,536차원 벡터로 변환합니다.
-  백엔드에서 Entra ID 또는 외부 리소스의 API key로 호출하고, 생성한 벡터를 HorizonDB에 저장합니다.
+  초기 데이터는 setup이 backfill하고, 이후 의미 필드 변경은 HorizonDB `azure_ai` pipeline이 처리합니다.
+  검색어 벡터는 FastAPI가 요청 시 생성합니다.
 - pgvector의 코사인 거리 연산자(`<=>`)로 자연어 검색 결과의 순서를 정합니다.
 - 벡터 후보 검색용 DiskANN 인덱스에 4-bit spherical quantization과 필터 검색 설정을 적용합니다.
   실제 인덱스 사용 여부는 실행 계획에 따라 달라지며, 샘플 24건만으로 성능 향상을 입증하지는 않습니다.
@@ -33,7 +34,11 @@ flowchart LR
     API --> Repo[Psycopg 데이터 접근 계층]
     Tool --> Repo
     Repo --> DB[(Azure HorizonDB)]
-    Repo -->|화물 의미 검색 시| Embeddings[Azure OpenAI 임베딩 API]
+    Repo -->|검색어 임베딩| Embeddings[Azure OpenAI 임베딩 API]
+    DB -->|배송 변경 trigger| Jobs[shipment_embedding_jobs]
+    Jobs -->|azure_ai on_change| Embeddings
+    Embeddings --> Sink[shipment_embeddings]
+    Sink --> DB
     DB --> PostGIS[PostGIS 좌표]
     DB --> Vector[pgvector 코사인 거리 + DiskANN]
 ```
@@ -48,7 +53,8 @@ flowchart LR
 
 **AI는 질문을 구조화된 검색 조건으로 해석하고, 백엔드는 SQL을 조합하며, HorizonDB는 그 SQL을 실행합니다.**
 HorizonDB가 자연어를 직접 해석하거나 AI가 작성한 임의의 SQL을 실행하는 구조는 아닙니다.
-SQL·공간·벡터 검색은 별도 DB를 조회하는 것이 아니라 같은 배송 테이블의 열과 확장 기능을 사용합니다.
+SQL·공간·벡터 검색은 별도 DB를 조회하지 않습니다. 배송 데이터와 벡터는 같은 HorizonDB 안에서
+`shipment_id` FK로 연결된 테이블에 나눠 저장합니다.
 이는 PostgreSQL·PostGIS·pgvector 기능을 HorizonDB에서 함께 사용하는 예시이며, 모두 HorizonDB만의 고유 기능은 아닙니다.
 
 ```mermaid
@@ -161,16 +167,21 @@ ETA 정렬과 화물 의미 검색·목적지 거리 정렬의 동시 사용은 
 ```sql
 WITH query_vector AS (SELECT %s::public.vector(1536) AS embedding)
 SELECT s.shipment_number,
-       1 - (s.embedding <=> query_vector.embedding) AS similarity
+       1 - (se.embedding <=> query_vector.embedding) AS similarity
 FROM horizon_ship.shipments AS s
+JOIN horizon_ship.shipment_embeddings AS se
+  ON se.shipment_id = s.id
+LEFT JOIN horizon_ship.shipment_embedding_jobs AS sej
+  ON sej.shipment_id = s.id
 CROSS JOIN query_vector
 WHERE (%s::text IS NULL OR s.status = %s)
+  AND (sej.shipment_id IS NULL OR sej.content_version = se.content_version)
   AND EXISTS (
       SELECT 1 FROM horizon_ship.region_boundaries AS region
       WHERE region.name = %s
         AND public.ST_Covers(region.boundary, s.origin_position)
   )
-ORDER BY s.embedding <=> query_vector.embedding
+ORDER BY se.embedding <=> query_vector.embedding
 LIMIT %s;
 ```
 
@@ -431,18 +442,22 @@ AZURE_OPENAI_DEPLOYMENT=gpt-5.4
 AZURE_EMBED_DEPLOYMENT=text-embedding-3-small
 ```
 
-`AZURE_OPENAI_KEY`가 비어 있으면 채팅과 임베딩 모두 Entra ID로 인증합니다.
-이 저장소의 Foundry 배포 스크립트는 `disableLocalAuth: true`로 key 인증을 차단하므로 빈 값을 유지합니다.
+현재 `azure_ai 2.2.2`의 BYOM pipeline 등록에는 subscription key가 필요합니다.
+따라서 `app.setup_database`를 실행할 때 `AZURE_OPENAI_KEY`를 비워 둘 수 없습니다.
+setup은 이 값을 HorizonDB model registry에 등록하고, backend의 채팅과 검색어 임베딩에도 사용합니다.
 
 기존 외부 Foundry에서 key 인증을 허용한다면 로컬 설정의 `AZURE_OPENAI_KEY`에 유효한 key를 입력합니다.
 key가 있으면 채팅과 임베딩 모두 해당 key를 사용하며 Entra ID로 자동 재시도하지 않습니다.
 배포 스크립트는 외부 Foundry를 수정하거나 key를 조회하지 않습니다. 노출된 key는 폐기·재발급하고,
 채팅·소스·로그에는 넣지 마세요.
 
+이 저장소의 Foundry 배포 스크립트는 `disableLocalAuth: true`로 key 인증을 차단합니다. 이 설정으로 만든
+Foundry는 현재 DB pipeline에 사용할 수 없습니다. key 인증이 가능한 기존 Foundry를 사용해야 합니다.
+
 | 구성 | 인증 방식 | 사전 준비 |
 | --- | --- | --- |
-| 새로 배포한 Foundry 또는 key를 사용하지 않는 기존 Foundry | 백엔드의 `DefaultAzureCredential` | 로컬 `az login` 또는 백엔드 Managed Identity와 모델 호출 RBAC |
-| key 인증을 허용하는 외부 Foundry | 백엔드의 API key 인증 | 외부 리소스의 endpoint, 유효한 key, 두 모델의 실제 deployment 이름 |
+| key 인증을 허용하는 외부 Foundry | backend와 DB model registry의 subscription key 인증 | 외부 리소스의 endpoint, 유효한 key, 두 모델의 실제 deployment 이름 |
+| 새로 배포한 Entra ID 전용 Foundry | backend 호출만 가능하며 현재 DB pipeline 등록은 불가 | backend Managed Identity와 모델 호출 RBAC |
 
 로컬 개발에서는 앱을 실행할 계정으로 `az login`을 수행합니다. `DefaultAzureCredential`은
 환경 변수, Managed Identity, Azure CLI 등 지원되는 자격 증명을 순서대로 검사하므로,
@@ -454,11 +469,11 @@ Entra ID를 사용하는 백엔드 계정에 **부모 Foundry 리소스 범위**
 Project 범위 권한이나 리소스 관리용 Contributor 권한만으로 모델 호출 권한을 대신할 수는 없습니다.
 권한 변경 직후에는 반영에 시간이 걸릴 수 있습니다.
 
-DB는 Foundry를 직접 호출하지 않습니다. DB 모델 레지스트리 등록, DB Identity와 Foundry 호출용 DB RBAC는
-앱 실행에 필요하지 않으며 key나 토큰을 DB에 저장하지 않습니다. 이전 버전이 만든 모델 등록과 Identity는
-자동 삭제하지 않으므로, 다른 용도가 없는지 확인한 뒤 별도로 정리합니다.
+DB pipeline은 배송의 의미 필드가 바뀌면 Foundry embedding deployment를 직접 호출합니다.
+setup은 subscription key를 DB model registry에 저장하므로 DB 관리자 권한, 백업 접근 권한, 로그 정책을
+운영 환경의 비밀정보 관리 기준에 맞춰 제한해야 합니다. key는 setup 출력이나 애플리케이션 로그에 기록하지 않습니다.
 2026-09-10 검증에서 `azure_ai` 2.2.2의 BYOM Managed Identity 인증이 미지원 오류를 반환했으며,
-현재 구조는 이 경로를 사용하지 않습니다.
+현재 구조는 subscription key 인증을 사용합니다.
 
 `AZURE_OPENAI_ENDPOINT`는 `https://<resource>.openai.azure.com/` 또는
 `https://<resource>.services.ai.azure.com/` 형식의 리소스 주소를 사용합니다.
@@ -481,19 +496,19 @@ DB 접속 인증은 별개이므로 기존 PostgreSQL 사용자 이름과 비밀
 SHOW azure.extensions;
 ```
 
-허용 목록에 `vector`, `pg_diskann`, `postgis`, `uuid-ossp`가 모두 있어야 합니다.
+허용 목록에 `vector`, `pg_diskann`, `postgis`, `uuid-ossp`, `azure_ai`가 모두 있어야 합니다.
 목록이 비어 있거나 필요한 항목이 빠졌다면, HorizonDB에 연결할 parameter group의
 `azure.extensions` 값에 다음 항목을 포함하도록 구성합니다. 기존에 허용한 다른 확장은 유지합니다.
 
 ```text
-vector,pg_diskann,postgis,uuid-ossp
+vector,pg_diskann,postgis,uuid-ossp,azure_ai
 ```
 
 Parameter group 생성·연결과 적용 상태 확인은
 [HorizonDB 확장 허용 안내](https://learn.microsoft.com/en-us/azure/horizondb/extensions/how-to-allow-extensions)를 따릅니다.
 적용 후 DB에 다시 접속해 `SHOW azure.extensions;` 결과를 확인합니다.
 이 설정만을 위해 전체 인프라를 재배포하지 말고, 대상 클러스터의 parameter group과 다른 설정에 미치는 영향을 먼저 확인합니다.
-인프라 템플릿은 기존 설정과의 호환성을 위해 `azure_ai` 허용 항목도 유지하지만 앱은 이를 설치하거나 호출하지 않습니다.
+인프라 템플릿은 `azure_ai` 허용 항목을 포함합니다. setup은 이 확장을 설치하고 pipeline을 구성합니다.
 
 **서버의 확장 허용과 DB의 확장 설치는 별도 단계입니다.**
 [데이터베이스 준비 코드](backend/app/setup_database.py)는
@@ -512,6 +527,7 @@ uv run python -m app.setup_database
 
 첫 실행은 몇 분 걸릴 수 있습니다. 허용된 확장을 대상 DB에 설치하고 스키마를 만든 뒤,
 번들 경계 일곱 개를 적재하고 배송 샘플 24건과 임베딩을 생성한 뒤 DiskANN 인덱스를 구성합니다.
+마지막으로 model registry, `on_change` pipeline, 배송 변경 trigger를 설정합니다.
 다음 메시지가 나올 때까지 기다립니다.
 
 ```text
@@ -520,9 +536,12 @@ HorizonShip ready: 24 shipments, 24 Azure embeddings, primary DiskANN index: rea
 
 이 명령은 다시 실행해도 샘플 배송을 중복 생성하지 않고 데이터베이스를 갱신합니다.
 임베딩 endpoint·deployment·차원을 DB의 `embedding_configuration`에 저장하고,
-설정 변경 또는 배송 검색 대상 텍스트 변경 시 벡터를 다시 생성합니다. 인증 방식이나 key 변경만으로는 재생성하지 않습니다.
+기존 `shipments.embedding` 값은 `shipment_embeddings`로 옮긴 뒤 기존 열을 제거합니다.
+초기 backfill은 backend가 실행합니다. 이후 배송의 의미 필드가 바뀌면 trigger가 `shipment_embedding_jobs`를 갱신하고,
+pipeline이 `shipment_embeddings`의 현재 벡터를 upsert합니다. 위치·ETA만 바뀐 경우에는 새 임베딩을 요청하지 않습니다.
+pipeline 처리 중에는 job과 sink의 `content_version`이 같은 배송만 의미 검색 결과에 포함합니다.
+인증 방식이나 key 변경만으로는 전체 벡터를 다시 만들지 않습니다.
 같은 deployment 이름의 실제 모델을 교체했다면 `uv run python -m app.setup_database --force-embeddings`를 실행합니다.
-이전 DB 모델 레지스트리 방식에서 처음 전환할 때도 준비 명령을 다시 실행해야 합니다.
 배치 응답 개수·순서·차원을 검사하며, 실패하면 DB 트랜잭션을 롤백합니다. 이미 호출한 모델의 비용은 되돌릴 수 없습니다.
 
 기존 DB에 경계만 추가하거나 다시 적재할 때는 `backend` 폴더에서 아래 명령을 실행합니다.

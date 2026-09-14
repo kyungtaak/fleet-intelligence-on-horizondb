@@ -14,11 +14,17 @@ from app.models import (
     SearchRequest,
     SearchResponse,
     Shipment,
+    ShipmentCreate,
     ShipmentStats,
     ShipmentStatus,
+    ShipmentUpdate,
 )
 from app.progress import stream_chat
-from app.repository import PostgresShipmentRepository, ShipmentRepository
+from app.repository import (
+    PostgresShipmentRepository,
+    ShipmentAlreadyExistsError,
+    ShipmentRepository,
+)
 
 
 def _get_repository(request: Request) -> ShipmentRepository:
@@ -73,7 +79,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=resolved_settings.cors_origins,
         allow_credentials=False,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PATCH"],
         allow_headers=["Content-Type"],
     )
 
@@ -103,6 +109,23 @@ def create_app(
     ) -> list[Shipment]:
         return await shipment_repository.list_shipments(shipment_status, search)
 
+    @app.post(
+        "/api/shipments",
+        response_model=Shipment,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_shipment(
+        request: ShipmentCreate,
+        shipment_repository: RepositoryDependency,
+    ) -> Shipment:
+        try:
+            return await shipment_repository.create_shipment(request)
+        except ShipmentAlreadyExistsError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Shipment number already exists",
+            ) from exc
+
     @app.get("/api/shipments/stats", response_model=ShipmentStats)
     async def shipment_stats(
         shipment_repository: RepositoryDependency,
@@ -115,6 +138,22 @@ def create_app(
         shipment_repository: RepositoryDependency,
     ) -> Shipment:
         shipment = await shipment_repository.get_shipment(shipment_number.upper())
+        if shipment is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Shipment not found",
+            )
+        return shipment
+
+    @app.patch("/api/shipments/{shipment_number}", response_model=Shipment)
+    async def update_shipment(
+        shipment_number: str,
+        request: ShipmentUpdate,
+        shipment_repository: RepositoryDependency,
+    ) -> Shipment:
+        shipment = await shipment_repository.update_shipment(
+            shipment_number.upper(), request,
+        )
         if shipment is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

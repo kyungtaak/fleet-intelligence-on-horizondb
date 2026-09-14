@@ -10,6 +10,7 @@ from app.config import Settings
 from app.embeddings import (
     EMBEDDING_DIMENSIONS,
     embedding_client,
+    model_registry_endpoint,
     openai_base_url,
     serialize_embeddings,
 )
@@ -18,6 +19,7 @@ from app.region_boundaries import load_region_boundaries
 from app.sample_data import build_sample_shipments
 
 SCHEMA_PATH = Path(__file__).parents[2] / "database" / "schema.sql"
+PIPELINE_NAME = "horizon_ship_shipment_embeddings"
 
 EMBEDDING_CONFIG_LOOKUP_SQL = """
 SELECT endpoint, deployment, dimensions
@@ -80,17 +82,6 @@ ON CONFLICT (shipment_number) DO UPDATE SET
     status = EXCLUDED.status,
     eta = EXCLUDED.eta,
     updated_at = EXCLUDED.updated_at,
-    embedding = CASE
-        WHEN existing.title IS DISTINCT FROM EXCLUDED.title
-            OR existing.description IS DISTINCT FROM EXCLUDED.description
-            OR existing.origin_name IS DISTINCT FROM EXCLUDED.origin_name
-            OR existing.destination_name IS DISTINCT FROM EXCLUDED.destination_name
-            OR existing.current_location_name IS DISTINCT FROM EXCLUDED.current_location_name
-            OR existing.status IS DISTINCT FROM EXCLUDED.status
-            OR existing.metadata IS DISTINCT FROM EXCLUDED.metadata
-        THEN NULL
-        ELSE existing.embedding
-    END,
     metadata = EXCLUDED.metadata;
 """
 
@@ -107,17 +98,20 @@ SELECT id,
         shipment.metadata::text
     ) AS input
 FROM horizon_ship.shipments AS shipment
-WHERE embedding IS NULL
+LEFT JOIN horizon_ship.shipment_embeddings AS embedding
+    ON embedding.shipment_id = shipment.id
+WHERE embedding.shipment_id IS NULL
 ORDER BY shipment_number
 LIMIT %s
-FOR UPDATE;
+FOR UPDATE OF shipment;
 """
 
 PRIMARY_INDEX_SQL = """
 DROP INDEX IF EXISTS horizon_ship.shipments_embedding_diskann_idx;
+DROP INDEX IF EXISTS horizon_ship.shipment_embeddings_diskann_idx;
 
-CREATE INDEX shipments_embedding_diskann_idx
-    ON horizon_ship.shipments
+CREATE INDEX shipment_embeddings_diskann_idx
+    ON horizon_ship.shipment_embeddings
     USING diskann (embedding vector_cosine_ops)
     WITH (
         spherical_quantized = true,
@@ -125,7 +119,57 @@ CREATE INDEX shipments_embedding_diskann_idx
         sq_training_samples = 25000
     );
 
-ANALYZE horizon_ship.shipments;
+ANALYZE horizon_ship.shipment_embeddings;
+"""
+
+PIPELINE_SINK_ACTION = """DO UPDATE SET
+    embedding_input = EXCLUDED.embedding_input,
+    content_version = EXCLUDED.content_version,
+    updated_at = EXCLUDED.updated_at,
+    metadata = EXCLUDED.metadata,
+    embedding = EXCLUDED.embedding"""
+
+CREATE_PIPELINE_SQL = """
+SELECT ai.create_pipeline(
+    name => %s,
+    source => ai.table_source(
+        table_name => 'shipment_embedding_jobs',
+        schema_name => 'horizon_ship',
+        incremental_column => 'updated_at'
+    ),
+    steps => ARRAY[
+        ai.embed(
+            input => 'embedding_input',
+            model => %s,
+            dimensions => 1536
+        )
+    ],
+    trigger => 'on_change',
+    sink => ai.table_sink(
+        table_name => 'shipment_embeddings',
+        schema_name => 'horizon_ship',
+        on_conflict => ARRAY['shipment_id'],
+        on_conflict_action => %s
+    )
+);
+"""
+
+CREATE_ENQUEUE_TRIGGER_SQL = """
+DROP TRIGGER IF EXISTS shipments_enqueue_embedding
+ON horizon_ship.shipments;
+
+CREATE TRIGGER shipments_enqueue_embedding
+AFTER INSERT OR UPDATE OF
+    title,
+    description,
+    origin_name,
+    destination_name,
+    current_location_name,
+    status,
+    metadata
+ON horizon_ship.shipments
+FOR EACH ROW
+EXECUTE FUNCTION horizon_ship.enqueue_shipment_embedding();
 """
 
 
@@ -188,6 +232,107 @@ def configure_embeddings(
     return True
 
 
+def configure_pipeline_model(
+    connection: psycopg.Connection[Any],
+    settings: Settings,
+) -> None:
+    if not settings.azure_openai_key:
+        raise RuntimeError(
+            "AZURE_OPENAI_KEY is required to register the HorizonDB pipeline model"
+        )
+
+    expected = (
+        settings.embedding_model_alias,
+        model_registry_endpoint(settings.azure_openai_endpoint),
+        settings.azure_embed_deployment,
+        settings.azure_embed_deployment,
+        "subscription-key",
+    )
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+SELECT alias, endpoint, deployment_name, model_name, auth_type
+FROM model_registry.model_list_all()
+WHERE alias = %s;
+""",
+            (settings.embedding_model_alias,),
+        )
+        current = cursor.fetchone()
+        if current is None:
+            cursor.execute(
+                """
+SELECT model_registry.model_add(
+    p_alias => %s,
+    p_endpoint => %s,
+    p_deployment_name => %s,
+    p_model_name => %s,
+    p_api_version => NULL,
+    p_auth_type => %s,
+    p_endpoint_key => %s
+);
+""",
+                (*expected, settings.azure_openai_key),
+            )
+            return
+        if tuple(current) != expected:
+            raise RuntimeError(
+                f"Model alias {settings.embedding_model_alias!r} is registered "
+                "with different nonsecret metadata"
+            )
+        cursor.execute(
+            "SELECT model_registry.model_key_update(%s, %s);",
+            (settings.embedding_model_alias, settings.azure_openai_key),
+        )
+
+
+def migrate_legacy_embeddings(connection: psycopg.Connection[Any]) -> int:
+    cursor = connection.execute(
+        """
+SELECT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'horizon_ship'
+        AND table_name = 'shipments'
+        AND column_name = 'embedding'
+);
+"""
+    )
+    if not cursor.fetchone()[0]:
+        return 0
+    cursor = connection.execute(
+        """
+INSERT INTO horizon_ship.shipment_embeddings (
+    shipment_id,
+    embedding_input,
+    content_version,
+    updated_at,
+    metadata,
+    embedding
+)
+SELECT
+    shipment.id,
+    concat_ws(
+        ' ',
+        shipment.title,
+        shipment.description,
+        shipment.origin_name,
+        shipment.destination_name,
+        shipment.current_location_name,
+        shipment.status,
+        shipment.metadata::text
+    ),
+    1,
+    shipment.updated_at,
+    jsonb_build_object('shipment_number', shipment.shipment_number),
+    shipment.embedding
+FROM horizon_ship.shipments AS shipment
+WHERE shipment.embedding IS NOT NULL
+ON CONFLICT (shipment_id) DO NOTHING;
+"""
+    )
+    return cursor.rowcount
+
+
 def backfill_embeddings(
     connection: psycopg.Connection[Any],
     settings: Settings,
@@ -208,9 +353,35 @@ def backfill_embeddings(
                 )
                 vectors = serialize_embeddings(response, len(batch))
                 cursor.executemany(
-                    "UPDATE horizon_ship.shipments SET embedding = %s::public.vector(1536) "
-                    "WHERE id = %s;",
-                    [(vector, row[0]) for vector, row in zip(vectors, batch, strict=True)],
+                    """
+INSERT INTO horizon_ship.shipment_embeddings (
+    shipment_id,
+    embedding_input,
+    content_version,
+    updated_at,
+    metadata,
+    embedding
+)
+SELECT
+    shipment.id,
+    %s,
+    1,
+    shipment.updated_at,
+    jsonb_build_object('shipment_number', shipment.shipment_number),
+    %s::public.vector(1536)
+FROM horizon_ship.shipments AS shipment
+WHERE shipment.id = %s
+ON CONFLICT (shipment_id) DO UPDATE SET
+    embedding_input = EXCLUDED.embedding_input,
+    content_version = EXCLUDED.content_version,
+    updated_at = EXCLUDED.updated_at,
+    metadata = EXCLUDED.metadata,
+    embedding = EXCLUDED.embedding;
+""",
+                    [
+                        (row[1], vector, row[0])
+                        for vector, row in zip(vectors, batch, strict=True)
+                    ],
                 )
             embedded += len(batch)
             if len(batch) < settings.embedding_batch_size:
@@ -219,10 +390,69 @@ def backfill_embeddings(
 
 def database_counts(connection: psycopg.Connection[Any]) -> tuple[int, int]:
     cursor = connection.execute(
-        "SELECT count(*), count(embedding) FROM horizon_ship.shipments;"
+        """
+SELECT count(*), count(embedding.embedding)
+FROM horizon_ship.shipments AS shipment
+LEFT JOIN horizon_ship.shipment_embeddings AS embedding
+    ON embedding.shipment_id = shipment.id;
+"""
     )
     shipment_count, embedding_count = cursor.fetchone()
     return int(shipment_count), int(embedding_count)
+
+
+def configure_embedding_pipeline(
+    connection: psycopg.Connection[Any],
+    settings: Settings,
+) -> bool:
+    cursor = connection.execute(
+        "SELECT source_config, steps, sink_config, trigger_type, paused "
+        "FROM ai.pipelines WHERE name = %s;",
+        (PIPELINE_NAME,),
+    )
+    current = cursor.fetchone()
+    if current is None:
+        connection.execute(
+            CREATE_PIPELINE_SQL,
+            (PIPELINE_NAME, settings.embedding_model_alias, PIPELINE_SINK_ACTION),
+        )
+        created = True
+    else:
+        source, steps, sink, trigger_type, paused = current
+        valid = (
+            source.get("schema_name") == "horizon_ship"
+            and source.get("table_name") == "shipment_embedding_jobs"
+            and source.get("incremental_column") == "updated_at"
+            and len(steps) == 1
+            and steps[0].get("step") == "embed"
+            and steps[0].get("column") == "embedding_input"
+            and steps[0].get("model") == settings.embedding_model_alias
+            and steps[0].get("dimensions") == EMBEDDING_DIMENSIONS
+            and sink.get("schema_name") == "horizon_ship"
+            and sink.get("table_name") == "shipment_embeddings"
+            and sink.get("on_conflict") == ["shipment_id"]
+            and sink.get("on_conflict_action") == PIPELINE_SINK_ACTION
+            and trigger_type == "on_change"
+        )
+        if not valid:
+            raise RuntimeError(
+                f"AI pipeline {PIPELINE_NAME!r} exists with a different definition"
+            )
+        if paused:
+            connection.execute("SELECT ai.resume(%s);", (PIPELINE_NAME,))
+        created = False
+    connection.execute(CREATE_ENQUEUE_TRIGGER_SQL, prepare=False)
+    return created
+
+
+def remove_legacy_embedding_column(connection: psycopg.Connection[Any]) -> None:
+    connection.execute(
+        """
+DROP INDEX IF EXISTS horizon_ship.shipments_embedding_diskann_idx;
+ALTER TABLE horizon_ship.shipments DROP COLUMN IF EXISTS embedding;
+""",
+        prepare=False,
+    )
 
 
 def setup_database(
@@ -237,12 +467,14 @@ def setup_database(
 
     with psycopg.connect(database_conninfo) as connection:
         apply_schema(connection)
+        configure_pipeline_model(connection, settings)
         load_region_boundaries(connection)
         seed_shipments(connection)
 
         configuration_changed = configure_embeddings(connection, settings)
+        migrate_legacy_embeddings(connection)
         if configuration_changed or force_embeddings:
-            connection.execute("UPDATE horizon_ship.shipments SET embedding = NULL;")
+            connection.execute("DELETE FROM horizon_ship.shipment_embeddings;")
         backfill_embeddings(connection, settings)
 
         shipment_count, embedding_count = database_counts(connection)
@@ -253,6 +485,8 @@ def setup_database(
                 f"{embedding_count}/{shipment_count} shipments embedded"
             )
         connection.execute(PRIMARY_INDEX_SQL, prepare=False)
+        remove_legacy_embedding_column(connection)
+        configure_embedding_pipeline(connection, settings)
 
     return SetupResult(
         shipment_count=shipment_count,

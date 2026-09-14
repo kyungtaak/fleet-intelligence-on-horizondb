@@ -1,6 +1,8 @@
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -8,12 +10,15 @@ from app.config import Settings
 from app.models import (
     DatabaseCapabilities,
     Shipment,
+    ShipmentCreate,
     ShipmentFilters,
     ShipmentSearchResult,
     ShipmentStats,
     ShipmentStatus,
+    ShipmentUpdate,
     StatusCount,
 )
+from app.repository import ShipmentAlreadyExistsError
 from app.sample_data import build_sample_shipments
 
 
@@ -69,6 +74,32 @@ class FakeShipmentRepository:
             ),
             None,
         )
+
+    async def create_shipment(self, shipment: ShipmentCreate) -> Shipment:
+        if await self.get_shipment(shipment.shipment_number):
+            raise ShipmentAlreadyExistsError(shipment.shipment_number)
+        created = Shipment(
+            id=uuid4(),
+            updated_at=datetime.now(UTC),
+            **shipment.model_dump(),
+        )
+        self._shipments.append(created)
+        return created
+
+    async def update_shipment(
+        self,
+        shipment_number: str,
+        shipment: ShipmentUpdate,
+    ) -> Shipment | None:
+        for index, current in enumerate(self._shipments):
+            if current.shipment_number == shipment_number:
+                updated = current.model_copy(update={
+                    **shipment.model_dump(exclude_unset=True),
+                    "updated_at": datetime.now(UTC),
+                })
+                self._shipments[index] = updated
+                return updated
+        return None
 
     async def search_shipments(self, filters: ShipmentFilters, limit: int) -> ShipmentSearchResult:
         shipments = await self.semantic_search(filters.cargo_query, filters.status, limit)

@@ -32,6 +32,12 @@ def openai_base_url(endpoint: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, "/openai/v1/", "", ""))
 
 
+def model_registry_endpoint(endpoint: str) -> str:
+    openai_base_url(endpoint)
+    parts = urlsplit(endpoint.strip())
+    return urlunsplit((parts.scheme, parts.netloc, "/", "", ""))
+
+
 @contextmanager
 def embedding_client(settings: Settings) -> Iterator[OpenAI]:
     with ExitStack() as stack:

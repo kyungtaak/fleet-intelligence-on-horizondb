@@ -24,8 +24,9 @@ Foundry는 `AIServices/S0`이며 `gpt-5.4` 버전 `2026-03-05`와
 `text-embedding-3-small` 버전 `1`을 Global Standard, capacity 각각 10으로 배포합니다.
 capacity는 모델별 quota 단위이며 요청 건수나 토큰 수 자체가 아닙니다.
 
-HorizonDB는 모델을 직접 호출하지 않으므로 DB용 Identity나 Foundry 호출 RBAC를 만들지 않습니다.
-DB 접속용 비밀번호 인증은 유지합니다. 채팅과 임베딩은 백엔드가 호출하며 Entra ID 또는 외부 Foundry의 key로 인증합니다.
+DB 접속용 비밀번호 인증은 유지합니다. 채팅과 검색어 임베딩은 backend가 호출합니다.
+배송 데이터 변경 후 벡터를 갱신하는 `azure_ai` pipeline은 DB가 Foundry를 직접 호출하며,
+현재 구성에서는 key 인증이 가능한 외부 Foundry가 필요합니다.
 
 모델 이름은 백엔드 기본값과 일치합니다. Agent Framework가 OpenAI endpoint를 직접 호출하므로
 Foundry 배포에는 project를 포함하지 않습니다. 포털에서 모델을 확인하고 테스트할 때는
@@ -189,7 +190,9 @@ $callerObjectId = az ad signed-in-user show --query id --output tsv
 
 백엔드의 Managed Identity 또는 서비스 주체에는 해당 object ID와 `-ModelCallerPrincipalType ServicePrincipal`을
 지정합니다. application/client ID가 아닙니다. RBAC를 생략하면 관리자가 호출 권한을 별도로 준비해야 합니다.
-새 Foundry는 API key를 비운 백엔드에서 사용하며, 모델 호출 계정에 권한이 반영됐는지 확인합니다.
+새 Foundry는 API key를 비운 backend 호출에 사용할 수 있습니다. 다만 `disableLocalAuth: true`이므로
+현재 `azure_ai 2.2.2`의 BYOM pipeline에는 등록할 수 없습니다. DB pipeline을 함께 사용하려면
+key 인증을 허용하는 기존 Foundry를 별도로 준비해야 합니다.
 
 `-ModelSku`, `-ChatCapacity`, `-EmbeddingCapacity`는 Foundry 스크립트에서만 받습니다.
 사전 quota 검사는 요청한 전체 capacity만큼 미할당 quota가 있어야 통과하는 보수적인 방식입니다.
@@ -201,10 +204,10 @@ $callerObjectId = az ad signed-in-user show --query id --output tsv
 ## 이전 DB Identity 구성
 
 [configure-db-identity.ps1](configure-db-identity.ps1)과 [foundry-model-access.bicep](foundry-model-access.bicep)은
-이전 DB 직접 모델 호출 구성을 위한 보조 파일로 남겨 두었지만 현재 앱의 필수 단계가 아닙니다.
+Managed Identity 기반 DB 모델 호출을 검토할 때 쓰던 보조 파일이며 현재 앱의 필수 단계가 아닙니다.
 2026-09-10 검증에서 `azure_ai` 2.2.2의 BYOM 등록은 Managed Identity 인증 미지원 오류를 반환했습니다.
 DB Identity와 RBAC만 추가해 이 제한을 해결할 수 있다고 가정하지 않습니다.
-현재 앱은 백엔드에서 임베딩을 생성하며 DB 모델 레지스트리나 DB 토큰 발급을 사용하지 않습니다.
+현재 앱은 DB model registry에 subscription key를 등록합니다.
 기존 Identity·RBAC·모델 등록은 자동 삭제하지 않습니다. 다른 용도를 확인한 뒤 별도로 정리합니다.
 
 ## 기존 Foundry에 Project만 추가
@@ -263,17 +266,16 @@ Project는 부모 Foundry의 기존 모델 deployment를 공유합니다. 백엔
 | `AZURE_PG_USER` | 출력의 `databaseUser` |
 | `AZURE_PG_PASSWORD` | 배포 시 입력한 비밀번호 |
 | `AZURE_OPENAI_ENDPOINT` | 출력의 `openAiEndpoint` |
-| `AZURE_OPENAI_KEY` | 새 Foundry는 빈 값. key 인증을 허용하는 외부 리소스에 연결할 때만 해당 key를 로컬에 입력합니다. |
+| `AZURE_OPENAI_KEY` | key 인증을 허용하는 외부 리소스의 subscription key. DB pipeline 구성에 필수입니다. |
 | `AZURE_OPENAI_DEPLOYMENT` | `gpt-5.4` |
 | `AZURE_EMBED_DEPLOYMENT` | `text-embedding-3-small` |
 
 기존 설정 파일을 덮어쓰지 말고 필요한 값만 수정합니다. 키를 채팅이나 Git에 넣지 마세요.
 스크립트는 기존 로컬 설정 파일을 변경하지 않습니다.
 
-key가 없으면 백엔드의 채팅과 임베딩 모두 `DefaultAzureCredential`을 사용합니다.
-key가 있으면 두 호출 모두 key 인증을 사용하고, 인증 실패 시 다른 방식으로 자동 전환하지 않습니다.
-DB에는 벡터와 비밀이 아닌 임베딩 설정만 저장하며 DB용 모델 호출 Identity는 필요하지 않습니다.
-키 없는 실행 전에 [백엔드 인증 준비](../README.md#5-azure-연결-정보-입력)를 완료해야 합니다.
+key가 있으면 backend 호출과 DB pipeline 모두 key 인증을 사용합니다. 인증 실패 시 다른 방식으로 자동 전환하지 않습니다.
+setup은 key를 DB model registry에 저장하므로 DB와 백업의 접근 권한을 비밀정보 관리 기준에 맞춰 제한해야 합니다.
+key를 setup 출력, 채팅, Git에 넣지 마세요.
 DB 사용자 이름과 비밀번호는 그대로 필요하며, 키 인증을 다시 허용하도록 Azure 정책을 바꾸지는 않습니다.
 
 ```powershell
