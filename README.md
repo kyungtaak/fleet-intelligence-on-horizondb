@@ -11,8 +11,8 @@ HorizonShip은 배송 현황 조회, 지도 표시, 자연어 검색을 함께 �
 - Azure OpenAI의 `text-embedding-3-small`은 화물명·설명·지명·상태·metadata를 합친 텍스트를 1,536차원 벡터로 변환합니다.
   백엔드에서 Entra ID 또는 외부 리소스의 API key로 호출하고, 생성한 벡터를 HorizonDB에 저장합니다.
 - pgvector의 코사인 거리 연산자(`<=>`)로 자연어 검색 결과의 순서를 정합니다.
-- DiskANN 인덱스는 가까운 벡터 후보를 빠르게 찾습니다.
-  이 샘플은 4-bit spherical quantization과 필터 검색 설정을 적용합니다.
+- 벡터 후보 검색용 DiskANN 인덱스에 4-bit spherical quantization과 필터 검색 설정을 적용합니다.
+  실제 인덱스 사용 여부는 실행 계획에 따라 달라지며, 샘플 24건만으로 성능 향상을 입증하지는 않습니다.
 - Microsoft Agent Framework는 `gpt-5.4` 기반 배송 어시스턴트를 실행합니다.
   어시스턴트는 정확한 조건을 SQL·PostGIS로 검사하고, 화물의 의미를 찾을 때만 벡터 검색을 추가합니다.
 
@@ -44,16 +44,160 @@ flowchart LR
 확인 후에는 필요한 조건을 포함한 완전한 질문으로 다시 요청합니다.
 브라우저는 이 레코드로 검색 결과 카드를 표시하고 지도에 표시할 배송을 필터링합니다.
 
-### 조건 검색과 의미 검색
+### AI 배송 도우미의 질의 처리 흐름
 
-| 질문 예시 | 처리 방식 | 검색어 임베딩 호출 |
+**AI는 질문을 구조화된 검색 조건으로 해석하고, 백엔드는 SQL을 조합하며, HorizonDB는 그 SQL을 실행합니다.**
+HorizonDB가 자연어를 직접 해석하거나 AI가 작성한 임의의 SQL을 실행하는 구조는 아닙니다.
+SQL·공간·벡터 검색은 별도 DB를 조회하는 것이 아니라 같은 배송 테이블의 열과 확장 기능을 사용합니다.
+이는 PostgreSQL·PostGIS·pgvector 기능을 HorizonDB에서 함께 사용하는 예시이며, 모두 HorizonDB만의 고유 기능은 아닙니다.
+
+```mermaid
+sequenceDiagram
+    participant UI as React 배송 도우미
+    participant API as FastAPI
+    participant AI as Agent Framework / gpt-5.4
+    participant Tool as search_shipments / Repository
+    participant Embed as 임베딩 API
+    participant DB as HorizonDB
+    UI->>API: POST /api/chat/stream (query, status, limit)
+    API->>AI: 현재 질문과 필수 상태 조건
+    alt 지원하는 검색 조건
+        AI->>Tool: ShipmentFilters로 도구 1회 호출
+        Tool->>Tool: 입력 검사, UI 상태 우선 적용, 조회 건수 결정
+        opt cargo_query가 있는 경우만
+            Tool->>Embed: 화물 검색어를 임베딩 요청
+            Embed-->>Tool: 1536차원 검색어 벡터
+        end
+        Tool->>DB: 조건과 정렬을 조합한 SQL + 바인딩 값
+        DB-->>Tool: 조회 결과 (제한 건수 + 최대 1행)
+        Tool-->>AI: 배송 정보, 거리 또는 유사도, has_more
+        AI-->>API: 조회 결과에 근거한 한국어 Markdown 답변
+        API-->>UI: result 이벤트 (답변 + 배송 레코드 + 적용 조건)
+        UI->>UI: 카드와 지도 결과 갱신
+    else 모호하거나 지원하지 않는 조건
+        AI-->>API: 검색 없이 확인 질문
+        API-->>UI: not_searched (기존 지도 결과 유지)
+    end
+    Note over UI,DB: 처리 중에는 진행 단계, SQL, 바인딩 값 등을 NDJSON 이벤트로 전달
+```
+
+1. 브라우저가 현재 질문, 화면의 상태 필터, 표시 상한을 전달합니다. 대화 기록 전체는 전송하지 않습니다.
+2. Agent가 질문을 [ShipmentFilters](backend/app/models.py)로 해석합니다. 상태·지명·권역은 정확한 조건에,
+   화물의 의미는 `cargo_query`에 넣습니다. 한국어 지명은 등록된 영문 이름으로 대응합니다.
+3. [검색 도구](backend/app/agent.py)가 입력을 검사하고 화면에서 지정한 상태를 우선 적용합니다.
+   [Repository](backend/app/repository.py)는 등록된 장소·권역과 조건 조합을 검사합니다.
+   열 이름과 정렬식은 코드에서 선택하고, 사용자 조건값은 Psycopg의 `%s` 바인딩으로 전달합니다.
+4. `cargo_query`가 있을 때만 백엔드가 임베딩 API를 호출합니다. 배송 벡터는 DB 준비 시 저장해 두고,
+   검색 시에는 질문에서 추출한 화물 검색어의 벡터만 생성합니다. Agent가 검색어를 번역하거나 요약할 수 있습니다.
+5. HorizonDB가 조건을 검사하고 결과를 정렬합니다. 요청 건수와 API 상한 중 작은 값을 적용하고,
+   한 행을 더 조회해 `has_more`를 판단한 뒤 표시할 배송만 반환합니다.
+6. Agent는 도구가 돌려준 배송 번호·경로·상태·ETA·거리·유사도로 답변을 작성합니다.
+   API의 배송 레코드는 답변 문장에서 다시 추출하지 않고 도구 결과를 그대로 사용합니다.
+
+조건 추출과 답변 작성에는 모델 판단이 들어갑니다. 아래 예시는 의도한 매핑이며, 모든 표현이 항상 같은
+필터로 해석됨을 보장하지는 않습니다. 실제 해석은 대화의 `실행 내역`에 표시되는 적용 조건으로 확인합니다.
+
+### 질문과 검색 방식 매핑
+
+표의 필터는 필요한 필드만 표시했습니다. `cargo_query`가 없는 검색은 검색어 임베딩을 호출하지 않습니다.
+
+| 질문 예시 | 구조화된 필터 예시 | DB 처리 | search_mode |
+| --- | --- | --- | --- |
+| 지연된 배송 | `status: "delayed"` | 상태 일치 | `sql` |
+| SHIP-0004를 찾아주세요 | `shipment_number: "SHIP-0004"` | 배송 번호 일치 | `sql` |
+| 로테르담으로 가는 배송 | `destination_name: "Rotterdam, Netherlands"` | 도착지 이름 일치 | `sql` |
+| 아시아권이 출발지인 배송 | `origin_region: "Asia"` | 출발 좌표에 `ST_Covers` | `gis` |
+| 유럽으로 가는 지연된 배송 | `destination_region: "Europe", status: "delayed"` | 도착 좌표에 `ST_Covers` + 상태 일치 | `gis` |
+| 부산 반경 100km 이내에서 출발한 배송 | `nearby_location: "Busan, South Korea", position_field: "origin", radius_km: 100` | 출발 좌표에 `ST_DWithin` | `gis` |
+| 현재 부산 반경 100km 이내인 배송 | `nearby_location: "Busan, South Korea", position_field: "current", radius_km: 100` | 현재 좌표에 `ST_DWithin` | `gis` |
+| 목적지에 가장 가까운 2개 | `sort_by: "destination_distance", result_limit: 2` | 현재 위치와 각 도착지의 `ST_Distance` 오름차순 | `gis` |
+| 로테르담으로 가는 운송 중 배송 중 목적지에 가장 가까운 2개 | `destination_name: "Rotterdam, Netherlands", status: "in_transit", sort_by: "destination_distance", result_limit: 2` | 도착지·상태 일치 + 목적지 거리순 | `gis` |
+| 의료기관에 필요한 화물 | `cargo_query: "medical supplies"` | 화물 검색어 임베딩 + 코사인 거리순 | `diskann_cosine` |
+| 지연된 의료용품 배송 | `status: "delayed", cargo_query: "medical supplies"` | 상태 일치 + 코사인 거리순 | `hybrid` |
+| 아시아에서 출발한 의료용품 | `origin_region: "Asia", cargo_query: "medical supplies"` | 출발 좌표에 `ST_Covers` + 코사인 거리순 | `hybrid` |
+
+`search_mode`는 다음 규칙으로 결정합니다. SQL·GIS 모드도 내부적으로는 모두 SQL을 실행합니다.
+
+| 모드 | 결정 조건 | 기본 결과 순서 |
 | --- | --- | --- |
-| 지연된 배송 | SQL의 상태 일치 | 없음 |
-| 아시아권이 출발지인 배송 | 출발 좌표와 아시아 경계의 PostGIS `ST_Covers` 검사 | 없음 |
-| 부산 반경 100km 이내에서 출발한 배송 | 출발 좌표의 PostGIS 거리 검사 | 없음 |
-| 목적지에 가장 가까운 2개 | 현재 좌표와 각 도착지 간 `ST_Distance` 거리순 상위 2건 | 없음 |
-| 의료기관에 필요한 화물 | 화물 검색어의 벡터 유사도 정렬 | 있음 |
-| 아시아에서 출발한 의료용품 | 출발 좌표의 PostGIS 영역 조건 + 화물 벡터 검색 | 있음 |
+| `sql` | 화물 의미 검색과 공간 조건 없이 상태·배송 번호·장소명 등으로 조회 | 배송 번호순 |
+| `gis` | 화물 의미 검색 없이 권역·반경·목적지 거리 정렬 중 하나 사용 | 배송 번호순, 목적지 거리 정렬을 요청하면 거리순 |
+| `diskann_cosine` | `cargo_query`만 있고 정확한 상태·번호·장소·권역·반경 조건은 없음 | 코사인 거리 오름차순 |
+| `hybrid` | `cargo_query`와 정확한 조건을 함께 사용 | 조건을 만족하는 결과의 코사인 거리순 |
+| `not_searched` | Agent가 도구를 호출하지 않고 확인 질문으로 응답 | 새 배송 결과 없음 |
+
+`result_limit`만 추가해도 모드가 바뀌지는 않습니다. 화면에서 상태를 선택한 상태로 화물 의미 검색을 하면
+필수 상태 조건이 추가되므로 `hybrid`가 됩니다. 반경 검색 자체는 거리순 정렬이 아닙니다.
+현재 위치가 아닌 출발·도착 좌표를 검색했더라도 지도 마커는 배송의 `current_position`을 표시합니다.
+
+### 필터별 의미와 제한
+
+| 필드 | 의미와 검사 방식 |
+| --- | --- |
+| `status` | `in_transit`, `delivered`, `delayed`, `exception`, `unknown` 중 하나로 일치 검사 |
+| `shipment_number` | `SHIP-0004` 같은 배송 번호 일치 검사 |
+| `origin_name`, `destination_name` | 등록된 장소명과 출발지·도착지 이름 일치 검사. 국가 전체나 좌표 반경 조건이 아님 |
+| `origin_region`, `destination_region` | `Asia`, `Middle East`, `Europe`, `North America`, `South America`, `Africa`, `Oceania` 경계와 해당 좌표 비교 |
+| `nearby_location`, `radius_km` | 등록된 기준 도시와 반경을 함께 지정. km를 미터로 바꿔 `ST_DWithin`에 전달 |
+| `position_field` | 반경을 검사할 좌표: `origin`, `destination`, `current`. 기본값은 `current` |
+| `cargo_query` | 화물 의미 검색어. 상태·지리·배송 번호·표시 지시는 넣지 않음 |
+| `sort_by` | 현재는 `destination_distance`만 지원. 현재 위치에서 각 배송의 자기 도착지까지 거리순 |
+| `result_limit` | 요청 건수 1~24. 실제 표시 건수는 API의 `limit` 상한도 적용 |
+
+지원하지 않는 국가 전체 조건, 날짜 범위, 임의의 제외 조건, 등록되지 않은 장소는 확인 질문 대상으로
+지시합니다. `도착이 임박한 배송`처럼 거리와 ETA 중 기준이 불분명하면 먼저 기준을 확인합니다.
+ETA 정렬과 화물 의미 검색·목적지 거리 정렬의 동시 사용은 지원하지 않습니다.
+거리순 검색의 기본 배송 완료 제외는 코드에 정해진 동작이며, 일반적인 제외 조건 지원을 뜻하지 않습니다.
+입력 검사나 외부 API·DB 호출이 실패하면 오류로 처리하며, 이를 검색 결과 0건이나 확인 질문으로 바꾸지 않습니다.
+
+### SQL 구성 예시
+
+다음은 설명을 위해 조회 열을 줄인 SQL입니다. 실행 내역에는 실제 조회 열과 바인딩 값을 표시합니다.
+
+`아시아에서 출발한 의료용품`은 출발 권역을 화물 검색어에 섞지 않습니다.
+예를 들어 `origin_region="Asia"`, `cargo_query="medical supplies"`로 해석했다면
+`medical supplies`만 임베딩하고, 권역은 별도의 공간 조건으로 유지합니다.
+
+```sql
+WITH query_vector AS (SELECT %s::public.vector(1536) AS embedding)
+SELECT s.shipment_number,
+       1 - (s.embedding <=> query_vector.embedding) AS similarity
+FROM horizon_ship.shipments AS s
+CROSS JOIN query_vector
+WHERE (%s::text IS NULL OR s.status = %s)
+  AND EXISTS (
+      SELECT 1 FROM horizon_ship.region_boundaries AS region
+      WHERE region.name = %s
+        AND public.ST_Covers(region.boundary, s.origin_position)
+  )
+ORDER BY s.embedding <=> query_vector.embedding
+LIMIT %s;
+```
+
+화면 상태 필터가 없고 상한이 8건이면 바인딩 순서는 `[검색어 벡터, null, null, "Asia", 9]`입니다.
+상태·권역 조건과 벡터 정렬을 한 SQL로 실행하며, 벡터 검색 결과에서 AI가 다시 출발 권역을 추측하지 않습니다.
+이는 SQL의 논리적인 조건을 설명한 것으로, DB 내부의 물리적인 실행 순서나 인덱스 선택을 고정하지는 않습니다.
+
+`목적지에 가장 가까운 2개`는 임베딩 없이 다음 방식으로 조회합니다.
+
+```sql
+SELECT s.shipment_number,
+       public.ST_Distance(
+           s.current_position::public.geography,
+           s.destination_position::public.geography
+       ) / 1000.0 AS remaining_distance_km
+FROM horizon_ship.shipments AS s
+WHERE (%s::text IS NULL OR s.status = %s)
+  AND s.status <> %s
+ORDER BY remaining_distance_km ASC, s.shipment_number ASC
+LIMIT %s;
+```
+
+상태를 지정하지 않았을 때 바인딩 값은 `[null, null, "delivered", 3]`입니다.
+3행 중 상위 2건만 반환하고 추가 행이 있으면 `has_more=true`로 표시합니다.
+명시적인 상태 조건이 있으면 기본 `delivered` 제외 조건 대신 해당 상태를 적용합니다.
+
+### 결과 표시와 지도 동작
 
 화면에는 실제 검색 방식, 적용 조건, 표시 건수를 보여줍니다. 요청당 최대 8건을 표시하고,
 결과가 더 있으면 `has_more`로 알립니다. 전체 조회나 페이지 이동 기능은 아직 없습니다.
@@ -75,6 +219,8 @@ AI 결과 카드의 본문을 누르면 배송을 선택하고 상세를 표시�
 이때 필터는 그대로 두고 지도에 선택 배송 한 건만 임시로 추가하며 `현재 검색 결과 외 배송`을 표시합니다.
 상세를 닫으면 임시 마커를 제거하고, 위치 보기로 이동한 경우 기존 결과 범위로 돌아옵니다.
 새 AI 검색이 완료되면 이전 선택을 해제합니다. 모바일에서는 카드 선택과 위치 보기 모두 지도 탭을 엽니다.
+
+### 권역과 반경의 판정 기준
 
 권역은 DB의 `horizon_ship.region_boundaries`에 SRID 4326 MultiPolygon으로 저장합니다.
 [경계 적재 코드](backend/app/region_boundaries.py)는 Natural Earth v5.1.2의 1:50m 국가 경계를
@@ -106,7 +252,8 @@ AI 결과 카드의 본문을 누르면 배송을 선택하고 상세를 표시�
 출발지·도착지 geometry GiST 인덱스와 `geography` 표현식 GiST 인덱스를 실행 계획에 맞게 추가해야 합니다.
 기존 geometry 인덱스가 geography 형변환 검색에도 사용된다고 가정하지 않습니다.
 
-`POST /api/search`는 기존의 벡터 검색 직접 호출 API로 유지합니다. `/api/chat`만 구조화 조건 도구를 사용합니다.
+`POST /api/search`는 기존의 벡터 검색 직접 호출 API로 유지합니다.
+`POST /api/chat`과 `POST /api/chat/stream`은 같은 구조화 조건 도구를 사용하며 응답 전송 방식만 다릅니다.
 응답의 `search_mode`는 `sql`, `gis`, `diskann_cosine`, `hybrid` 중 하나이며, 확인 질문은 `not_searched`입니다.
 `diskann_cosine`이나 `hybrid`는 검색 경로 이름이며 실제 DiskANN Index Scan 실행을 보장하지 않습니다.
 앱 시작 시 일곱 권역의 적재 여부와 기존 벡터 준비 상태를 검사합니다.
@@ -152,11 +299,16 @@ DB 수신 행 수에는 추가 결과 확인용 한 행이 포함될 수 있어 
 | --- | --- |
 | [backend/app/main.py](backend/app/main.py) | FastAPI 애플리케이션과 REST 경로 |
 | [backend/app/agent.py](backend/app/agent.py) | Agent Framework 클라이언트와 배송 검색 도구 |
+| [backend/app/models.py](backend/app/models.py) | 검색 필터 입력 규격과 배송·대화 응답 모델 |
 | [backend/app/repository.py](backend/app/repository.py) | 비동기 Psycopg 연결, PostGIS 좌표 조회, 벡터 검색 |
+| [backend/app/search_locations.py](backend/app/search_locations.py) | 지원 장소 목록과 장소·반경 조건 검사 |
+| [backend/app/region_boundaries.py](backend/app/region_boundaries.py) | Natural Earth 권역 경계 적재 |
+| [backend/app/progress.py](backend/app/progress.py) | 요청별 NDJSON 진행 이벤트, timeout·취소 처리 |
 | [backend/app/setup_database.py](backend/app/setup_database.py) | 반복 실행 가능한 스키마, 샘플 데이터, 벡터, 인덱스 설정 |
 | [backend/app/embeddings.py](backend/app/embeddings.py) | Entra ID·API key 인증, endpoint 정규화, 임베딩 응답 검사 |
 | [database/schema.sql](database/schema.sql) | HorizonDB 확장 기능과 관계형·벡터 스키마 |
 | [frontend/src](frontend/src) | React 운영 화면, Leaflet 지도, 어시스턴트 채팅 |
+| [frontend/src/components/ChatPanel.tsx](frontend/src/components/ChatPanel.tsx) | 한국어 답변, 실행 내역, 검색 조건·결과 카드 표시 |
 
 ## 로컬 실행
 
