@@ -6,6 +6,7 @@ CREATE EXTENSION IF NOT EXISTS azure_ai;
 
 CREATE SCHEMA IF NOT EXISTS horizon_ship;
 
+-- Records the embedding configuration expected by semantic search at startup.
 CREATE TABLE IF NOT EXISTS horizon_ship.embedding_configuration (
 	singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
 	endpoint text NOT NULL,
@@ -13,6 +14,7 @@ CREATE TABLE IF NOT EXISTS horizon_ship.embedding_configuration (
 	dimensions integer NOT NULL CHECK (dimensions = 1536)
 );
 
+-- Authoritative shipment business data. Embeddings are stored separately by FK.
 CREATE TABLE IF NOT EXISTS horizon_ship.shipments (
 	id uuid PRIMARY KEY DEFAULT public.uuid_generate_v4(),
 	shipment_number text NOT NULL UNIQUE,
@@ -32,6 +34,7 @@ CREATE TABLE IF NOT EXISTS horizon_ship.shipments (
 	metadata jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
+-- Outbox and azure_ai pipeline source. One row is retained per shipment.
 CREATE TABLE IF NOT EXISTS horizon_ship.shipment_embedding_jobs (
 	shipment_id uuid PRIMARY KEY
 		REFERENCES horizon_ship.shipments(id) ON DELETE CASCADE,
@@ -39,9 +42,12 @@ CREATE TABLE IF NOT EXISTS horizon_ship.shipment_embedding_jobs (
 	content_version bigint NOT NULL CHECK (content_version > 0),
 	updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
 	metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+	-- azure_ai 2.2.2 requires its default output column on the source schema.
+	-- This remains NULL; the generated vector is written to shipment_embeddings.
 	embedding public.vector(1536)
 );
 
+-- Pipeline sink containing the current searchable vector for each shipment.
 CREATE TABLE IF NOT EXISTS horizon_ship.shipment_embeddings (
 	shipment_id uuid PRIMARY KEY
 		REFERENCES horizon_ship.shipments(id) ON DELETE CASCADE,
@@ -52,6 +58,8 @@ CREATE TABLE IF NOT EXISTS horizon_ship.shipment_embeddings (
 	embedding public.vector(1536) NOT NULL
 );
 
+-- Enqueues inserts and semantic-field changes. setup_database.py installs the
+-- table trigger only after the initial backfill and DiskANN index are ready.
 CREATE OR REPLACE FUNCTION horizon_ship.enqueue_shipment_embedding()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -124,5 +132,9 @@ COMMENT ON TABLE horizon_ship.shipments IS
 	'Shipping data combining relational fields and PostGIS locations.';
 COMMENT ON TABLE horizon_ship.shipment_embedding_jobs IS
 	'Pipeline source containing only shipments whose semantic search input changed.';
+COMMENT ON COLUMN horizon_ship.shipment_embedding_jobs.content_version IS
+	'Incremented for each semantic change; search uses only matching sink versions.';
+COMMENT ON COLUMN horizon_ship.shipment_embedding_jobs.embedding IS
+	'Nullable azure_ai 2.2.2 output placeholder; actual vectors are stored in shipment_embeddings.';
 COMMENT ON TABLE horizon_ship.shipment_embeddings IS
 	'One current text-embedding-3-small vector per shipment, populated by initial backfill or the HorizonDB AI pipeline.';
