@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     database_pool_max_size: int = Field(default=5, ge=1, le=20)
     database_connect_timeout_seconds: float = Field(default=10, ge=1, le=60)
     azure_openai_endpoint: str = ""
-    azure_openai_key: str | None = None
+    azure_openai_key: str | None = Field(default=None, repr=False)
     azure_openai_deployment: str = "gpt-5.4"
     azure_embed_deployment: str = "text-embedding-3-small"
     azure_api_version: str = "2025-03-01-preview"
@@ -54,8 +54,8 @@ class Settings(BaseSettings):
         missing: list[str] = []
         if not self.database_conninfo:
             missing.append("DATABASE_URL or Azure PostgreSQL connection settings")
-        if not self.azure_openai_key:
-            missing.append("AZURE_OPENAI_KEY")
+        if not self.azure_openai_endpoint:
+            missing.append("AZURE_OPENAI_ENDPOINT")
         if missing:
             raise ValueError(
                 "Live HorizonShip configuration is required: " + ", ".join(missing)

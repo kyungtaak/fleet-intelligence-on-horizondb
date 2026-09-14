@@ -6,7 +6,8 @@ SCHEMA_PATH = Path(__file__).parents[2] / "database" / "schema.sql"
 def test_schema_contains_horizon_embedding_contract() -> None:
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
 
-    assert "CREATE EXTENSION IF NOT EXISTS azure_ai CASCADE" in schema
+    assert "CREATE TABLE IF NOT EXISTS horizon_ship.embedding_configuration" in schema
+    assert "CREATE EXTENSION IF NOT EXISTS azure_ai" not in schema
     assert "embedding public.vector(1536)" in schema
     assert "CREATE OR REPLACE FUNCTION horizon_ship.demo_embedding" not in schema
     assert "demo_embedding public.vector" not in schema

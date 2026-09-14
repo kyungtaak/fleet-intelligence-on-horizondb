@@ -128,6 +128,7 @@ def live_settings() -> Settings:
     return Settings(
         _env_file=None,
         database_url="postgresql://user:password@localhost/migration_lab",
+        azure_openai_endpoint="https://example.openai.azure.com/",
         azure_openai_key="test-key",
     )
 

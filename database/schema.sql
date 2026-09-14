@@ -1,10 +1,16 @@
-CREATE EXTENSION IF NOT EXISTS azure_ai CASCADE;
 CREATE EXTENSION IF NOT EXISTS vector CASCADE;
 CREATE EXTENSION IF NOT EXISTS pg_diskann CASCADE;
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 CREATE SCHEMA IF NOT EXISTS horizon_ship;
+
+CREATE TABLE IF NOT EXISTS horizon_ship.embedding_configuration (
+	singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+	endpoint text NOT NULL,
+	deployment text NOT NULL,
+	dimensions integer NOT NULL CHECK (dimensions = 1536)
+);
 
 CREATE TABLE IF NOT EXISTS horizon_ship.shipments (
 	id uuid PRIMARY KEY DEFAULT public.uuid_generate_v4(),

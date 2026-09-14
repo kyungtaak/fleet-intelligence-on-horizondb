@@ -7,27 +7,31 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from app.config import Settings
+from app.embeddings import (
+    EMBEDDING_DIMENSIONS,
+    embedding_client,
+    openai_base_url,
+    serialize_embeddings,
+)
 from app.models import Shipment
 from app.sample_data import build_sample_shipments
 
 SCHEMA_PATH = Path(__file__).parents[2] / "database" / "schema.sql"
 
-MODEL_LOOKUP_SQL = """
-SELECT endpoint, deployment_name, model_name, api_version, auth_type
-FROM model_registry.model_list_all()
-WHERE alias = %s;
+EMBEDDING_CONFIG_LOOKUP_SQL = """
+SELECT endpoint, deployment, dimensions
+FROM horizon_ship.embedding_configuration
+WHERE singleton = true
+FOR UPDATE;
 """
 
-MODEL_ADD_SQL = """
-SELECT model_registry.model_add(
-    %s,
-    %s,
-    %s,
-    %s,
-    %s,
-    'subscription-key',
-    %s
-);
+EMBEDDING_CONFIG_SQL = """
+INSERT INTO horizon_ship.embedding_configuration (singleton, endpoint, deployment, dimensions)
+VALUES (true, %s, %s, %s)
+ON CONFLICT (singleton) DO UPDATE SET
+    endpoint = EXCLUDED.endpoint,
+    deployment = EXCLUDED.deployment,
+    dimensions = EXCLUDED.dimensions;
 """
 
 SEED_SQL = """
@@ -90,16 +94,7 @@ ON CONFLICT (shipment_number) DO UPDATE SET
 """
 
 EMBED_BATCH_SQL = """
-WITH pending AS (
-    SELECT id
-    FROM horizon_ship.shipments
-    WHERE embedding IS NULL
-    ORDER BY shipment_number
-    LIMIT %s
-)
-UPDATE horizon_ship.shipments AS shipment
-SET embedding = azure_openai.create_embeddings(
-    %s,
+SELECT id,
     concat_ws(
         ' ',
         shipment.title,
@@ -109,11 +104,12 @@ SET embedding = azure_openai.create_embeddings(
         shipment.current_location_name,
         shipment.status,
         shipment.metadata::text
-    )
-)::public.vector(1536)
-FROM pending
-WHERE shipment.id = pending.id
-RETURNING shipment.id;
+    ) AS input
+FROM horizon_ship.shipments AS shipment
+WHERE embedding IS NULL
+ORDER BY shipment_number
+LIMIT %s
+FOR UPDATE;
 """
 
 PRIMARY_INDEX_SQL = """
@@ -136,7 +132,7 @@ ANALYZE horizon_ship.shipments;
 class SetupResult:
     shipment_count: int
     embedding_count: int
-    model_registered: bool
+    embedding_configuration_changed: bool
     primary_index_ready: bool
 
 
@@ -173,42 +169,21 @@ def seed_shipments(connection: psycopg.Connection[Any]) -> int:
     return len(shipments)
 
 
-def register_embedding_model(
+def configure_embeddings(
     connection: psycopg.Connection[Any],
     settings: Settings,
 ) -> bool:
     expected = (
-        settings.azure_openai_endpoint,
+        openai_base_url(settings.azure_openai_endpoint),
         settings.azure_embed_deployment,
-        settings.azure_embed_deployment,
-        settings.azure_api_version,
-        "subscription-key",
+        EMBEDDING_DIMENSIONS,
     )
     with connection.cursor() as cursor:
-        cursor.execute(MODEL_LOOKUP_SQL, (settings.embedding_model_alias,))
+        cursor.execute(EMBEDDING_CONFIG_LOOKUP_SQL)
         current = cursor.fetchone()
         if current is not None and tuple(current) == expected:
             return False
-        if not settings.azure_openai_key:
-            raise RuntimeError(
-                "AZURE_OPENAI_KEY is required to register or update the embedding model"
-            )
-        if current is not None:
-            cursor.execute(
-                "SELECT model_registry.model_remove(%s);",
-                (settings.embedding_model_alias,),
-            )
-        cursor.execute(
-            MODEL_ADD_SQL,
-            (
-                settings.embedding_model_alias,
-                settings.azure_openai_endpoint,
-                settings.azure_embed_deployment,
-                settings.azure_embed_deployment,
-                settings.azure_api_version,
-                settings.azure_openai_key,
-            ),
-        )
+        cursor.execute(EMBEDDING_CONFIG_SQL, expected)
     return True
 
 
@@ -217,16 +192,28 @@ def backfill_embeddings(
     settings: Settings,
 ) -> int:
     embedded = 0
-    while True:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                EMBED_BATCH_SQL,
-                (settings.embedding_batch_size, settings.embedding_model_alias),
-            )
-            batch = cursor.fetchall()
-        embedded += len(batch)
-        if len(batch) < settings.embedding_batch_size:
-            return embedded
+    with embedding_client(settings) as client:
+        while True:
+            with connection.cursor() as cursor:
+                cursor.execute(EMBED_BATCH_SQL, (settings.embedding_batch_size,))
+                batch = cursor.fetchall()
+                if not batch:
+                    return embedded
+                response = client.embeddings.create(
+                    model=settings.azure_embed_deployment,
+                    input=[row[1] for row in batch],
+                    dimensions=EMBEDDING_DIMENSIONS,
+                    encoding_format="float",
+                )
+                vectors = serialize_embeddings(response, len(batch))
+                cursor.executemany(
+                    "UPDATE horizon_ship.shipments SET embedding = %s::public.vector(1536) "
+                    "WHERE id = %s;",
+                    [(vector, row[0]) for vector, row in zip(vectors, batch, strict=True)],
+                )
+            embedded += len(batch)
+            if len(batch) < settings.embedding_batch_size:
+                return embedded
 
 
 def database_counts(connection: psycopg.Connection[Any]) -> tuple[int, int]:
@@ -251,8 +238,8 @@ def setup_database(
         apply_schema(connection)
         seed_shipments(connection)
 
-        model_registered = register_embedding_model(connection, settings)
-        if model_registered or force_embeddings:
+        configuration_changed = configure_embeddings(connection, settings)
+        if configuration_changed or force_embeddings:
             connection.execute("UPDATE horizon_ship.shipments SET embedding = NULL;")
         backfill_embeddings(connection, settings)
 
@@ -268,7 +255,7 @@ def setup_database(
     return SetupResult(
         shipment_count=shipment_count,
         embedding_count=embedding_count,
-        model_registered=model_registered,
+        embedding_configuration_changed=configuration_changed,
         primary_index_ready=primary_index_ready,
     )
 

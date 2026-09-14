@@ -3,9 +3,11 @@ from typing import Annotated, Any, Literal, Protocol
 
 from agent_framework import tool
 from agent_framework.openai import OpenAIChatClient
+from azure.identity import DefaultAzureCredential
 from pydantic import Field
 
 from app.config import Settings
+from app.embeddings import openai_base_url
 from app.models import ChatResponse, SearchRequest, Shipment, ShipmentStatus
 from app.repository import ShipmentRepository
 
@@ -56,16 +58,26 @@ class ShipmentAgent:
         repository: ShipmentRepository,
         client: AgentClient | None = None,
     ) -> None:
-        if client is None and not settings.azure_openai_key:
-            raise ValueError("AZURE_OPENAI_KEY is required for Agent Framework")
-
         self._settings = settings
         self._repository = repository
-        self._client = client or OpenAIChatClient(
-            model=settings.azure_openai_deployment,
-            azure_endpoint=settings.azure_openai_endpoint,
-            api_key=settings.azure_openai_key,
-        )
+        if client is not None:
+            self._client = client
+        elif settings.azure_openai_key:
+            self._client = OpenAIChatClient(
+                model=settings.azure_openai_deployment,
+                azure_endpoint=openai_base_url(settings.azure_openai_endpoint).removesuffix(
+                    "openai/v1/"
+                ),
+                api_key=settings.azure_openai_key,
+            )
+        else:
+            self._client = OpenAIChatClient(
+                model=settings.azure_openai_deployment,
+                azure_endpoint=openai_base_url(settings.azure_openai_endpoint).removesuffix(
+                    "openai/v1/"
+                ),
+                credential=DefaultAzureCredential(),
+            )
 
     async def run(self, request: SearchRequest) -> ChatResponse:
         matched_shipments: list[Shipment] = []

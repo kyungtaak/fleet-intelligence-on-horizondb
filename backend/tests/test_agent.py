@@ -1,8 +1,41 @@
+from unittest.mock import Mock
+
 import pytest
 
 from app.agent import ShipmentAgent
 from app.config import Settings
 from app.models import SearchRequest
+
+
+@pytest.mark.parametrize("api_key", [None, "", "test-key"])
+@pytest.mark.parametrize("endpoint", [
+    "https://example.openai.azure.com/",
+    "https://example.services.ai.azure.com/openai/v1/responses",
+])
+def test_agent_selects_authentication(monkeypatch, fake_repository, api_key, endpoint) -> None:
+    credential_factory = Mock()
+    client_factory = Mock()
+    monkeypatch.setattr("app.agent.DefaultAzureCredential", credential_factory)
+    monkeypatch.setattr("app.agent.OpenAIChatClient", client_factory)
+    settings = Settings(
+        _env_file=None,
+        azure_openai_endpoint=endpoint,
+        azure_openai_key=api_key,
+    )
+
+    ShipmentAgent(settings, fake_repository)
+
+    expected = {
+        "model": settings.azure_openai_deployment,
+        "azure_endpoint": endpoint.split("/openai/v1")[0].rstrip("/") + "/",
+    }
+    if api_key:
+        credential_factory.assert_not_called()
+        expected["api_key"] = api_key
+    else:
+        credential_factory.assert_called_once_with()
+        expected["credential"] = credential_factory.return_value
+    client_factory.assert_called_once_with(**expected)
 
 
 @pytest.mark.asyncio
