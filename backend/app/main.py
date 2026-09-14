@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,16 +12,20 @@ from app.config import Settings, get_settings
 from app.models import (
     ChatResponse,
     DatabaseCapabilities,
+    DemoShipmentDelete,
     SearchRequest,
     SearchResponse,
     Shipment,
+    ShipmentBulkCreate,
     ShipmentCreate,
+    ShipmentEmbeddingStatus,
     ShipmentStats,
     ShipmentStatus,
     ShipmentUpdate,
 )
 from app.progress import stream_chat
 from app.repository import (
+    DemoEmbeddingPendingError,
     PostgresShipmentRepository,
     ShipmentAlreadyExistsError,
     ShipmentRepository,
@@ -79,7 +84,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=resolved_settings.cors_origins,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PATCH"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Content-Type"],
     )
 
@@ -126,11 +131,56 @@ def create_app(
                 detail="Shipment number already exists",
             ) from exc
 
+    @app.post(
+        "/api/shipments/bulk",
+        response_model=list[Shipment],
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_shipments(
+        request: ShipmentBulkCreate,
+        shipment_repository: RepositoryDependency,
+    ) -> list[Shipment]:
+        try:
+            return await shipment_repository.create_shipments(request.shipments)
+        except ShipmentAlreadyExistsError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="One or more shipment numbers already exist",
+            ) from exc
+
     @app.get("/api/shipments/stats", response_model=ShipmentStats)
     async def shipment_stats(
         shipment_repository: RepositoryDependency,
     ) -> ShipmentStats:
         return await shipment_repository.stats()
+
+    @app.delete("/api/shipments/demo", response_model=list[UUID])
+    async def delete_demo_shipments(
+        request: DemoShipmentDelete,
+        shipment_repository: RepositoryDependency,
+    ) -> list[UUID]:
+        try:
+            return await shipment_repository.delete_demo_shipments(request.shipment_ids)
+        except DemoEmbeddingPendingError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Demo embeddings are still pending. Wait for completion before deleting.",
+            ) from exc
+
+    @app.get(
+        "/api/shipments/embedding-status",
+        response_model=ShipmentEmbeddingStatus,
+    )
+    async def shipment_embedding_status(
+        shipment_repository: RepositoryDependency,
+        shipment_numbers: Annotated[
+            list[str],
+            Query(alias="shipment_number"),
+        ],
+    ) -> ShipmentEmbeddingStatus:
+        return await shipment_repository.embedding_status(
+            [shipment_number.upper() for shipment_number in shipment_numbers]
+        )
 
     @app.get("/api/shipments/{shipment_number}", response_model=Shipment)
     async def shipment_detail(

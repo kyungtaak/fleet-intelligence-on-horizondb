@@ -11,6 +11,8 @@ from app.models import (
     DatabaseCapabilities,
     Shipment,
     ShipmentCreate,
+    ShipmentEmbeddingState,
+    ShipmentEmbeddingStatus,
     ShipmentFilters,
     ShipmentSearchResult,
     ShipmentStats,
@@ -28,6 +30,7 @@ class FakeShipmentRepository:
 
     def __init__(self) -> None:
         self._shipments = build_sample_shipments()
+        self._pending_embeddings: set[str] = set()
 
     async def list_shipments(
         self,
@@ -84,7 +87,18 @@ class FakeShipmentRepository:
             **shipment.model_dump(),
         )
         self._shipments.append(created)
+        self._pending_embeddings.add(created.shipment_number)
         return created
+
+    async def create_shipments(
+        self,
+        shipments: list[ShipmentCreate],
+    ) -> list[Shipment]:
+        numbers = [shipment.shipment_number for shipment in shipments]
+        existing = {shipment.shipment_number for shipment in self._shipments}
+        if len(numbers) != len(set(numbers)) or existing.intersection(numbers):
+            raise ShipmentAlreadyExistsError("bulk shipment insert")
+        return [await self.create_shipment(shipment) for shipment in shipments]
 
     async def update_shipment(
         self,
@@ -98,8 +112,44 @@ class FakeShipmentRepository:
                     "updated_at": datetime.now(UTC),
                 })
                 self._shipments[index] = updated
+                semantic_fields = {
+                    "title", "description", "origin_name", "destination_name",
+                    "current_location_name", "status", "metadata",
+                }
+                if semantic_fields.intersection(shipment.model_fields_set):
+                    self._pending_embeddings.add(shipment_number)
                 return updated
         return None
+
+    async def embedding_status(
+        self,
+        shipment_numbers: list[str],
+    ) -> ShipmentEmbeddingStatus:
+        known = {
+            shipment.shipment_number
+            for shipment in self._shipments
+            if shipment.shipment_number in shipment_numbers
+        }
+        states = [
+            ShipmentEmbeddingState(
+                shipment_number=shipment_number,
+                requested_version=2 if shipment_number in self._pending_embeddings else None,
+                embedded_version=1,
+                state=(
+                    "pending"
+                    if shipment_number in self._pending_embeddings
+                    else "ready"
+                ),
+            )
+            for shipment_number in sorted(known)
+        ]
+        ready = sum(item.state == "ready" for item in states)
+        return ShipmentEmbeddingStatus(
+            total=len(states),
+            ready=ready,
+            pending=len(states) - ready,
+            shipments=states,
+        )
 
     async def search_shipments(self, filters: ShipmentFilters, limit: int) -> ShipmentSearchResult:
         shipments = await self.semantic_search(filters.cargo_query, filters.status, limit)

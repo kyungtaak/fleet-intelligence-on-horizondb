@@ -19,6 +19,7 @@ import {
   searchShipments,
 } from './api'
 import { ChatPanel } from './components/ChatPanel'
+import { DemoDataPanel } from './components/DemoDataPanel'
 import { ShipmentDetail } from './components/ShipmentDetail'
 import { ShipmentList } from './components/ShipmentList'
 import { ShipmentMap } from './components/ShipmentMap'
@@ -49,6 +50,12 @@ function App() {
   const [mobileView, setMobileView] = useState<MobileView>('map')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [demoOpen, setDemoOpen] = useState(false)
+  const [chatRevision, setChatRevision] = useState(0)
+  const [queryRequest, setQueryRequest] = useState<{
+    id: number
+    query: string
+  } | null>(null)
   const deferredSearch = useDeferredValue(search.trim().toLowerCase())
 
   async function loadWorkspace() {
@@ -152,6 +159,65 @@ function App() {
     })
   }
 
+  function applyDemoShipments(changed: Shipment[], focus: Shipment | null) {
+    startTransition(() => {
+      setShipments((current) => {
+        const merged = new Map(
+          current.map((shipment) => [shipment.shipment_number, shipment]),
+        )
+        changed.forEach((shipment) => {
+          merged.set(shipment.shipment_number, shipment)
+        })
+        return [...merged.values()].sort((left, right) =>
+          left.shipment_number.localeCompare(right.shipment_number),
+        )
+      })
+      setSemanticResults(null)
+      setSearch('')
+      setStatus('all')
+      setSelected(focus)
+      setLocating(Boolean(focus))
+      if (focus) setLocateRequest((current) => current + 1)
+    })
+    void Promise.all([getShipmentStats(), getCapabilities()]).then(
+      ([nextStats, nextCapabilities]) => {
+        startTransition(() => {
+          setStats(nextStats)
+          setCapabilities(nextCapabilities)
+        })
+      },
+    )
+  }
+
+  function verifyDemoData(query: string) {
+    setDemoOpen(false)
+    setMobileView('assistant')
+    setQueryRequest((current) => ({
+      id: (current?.id ?? 0) + 1,
+      query,
+    }))
+  }
+
+  function removeDemoShipments(shipmentIds: string[]) {
+    const deleted = new Set(shipmentIds)
+    const removed = shipments.filter((shipment) => deleted.has(shipment.id))
+    setShipments((current) => current.filter((shipment) => !deleted.has(shipment.id)))
+    setStats((current) => current ? {
+      total: current.total - removed.length,
+      statuses: current.statuses.map((item) => ({
+        ...item,
+        count: item.count - removed.filter((shipment) => shipment.status === item.status).length,
+      })),
+    } : null)
+    setSemanticResults(null)
+    setSearch('')
+    setStatus('all')
+    setSelected(null)
+    setLocating(false)
+    setQueryRequest(null)
+    setChatRevision((current) => current + 1)
+  }
+
   async function runSemanticSearch(
     query: string, onProgress: (event: SearchProgress) => void, signal: AbortSignal,
   ): Promise<SearchResponse> {
@@ -241,6 +307,10 @@ function App() {
             setSearch('')
             setStatus('all')
           }}
+          onOpenDemo={() => {
+            setDemoOpen(true)
+            setMobileView('map')
+          }}
         />
 
         <section className="map-workspace" aria-label="Global shipment map">
@@ -276,14 +346,25 @@ function App() {
               onClose={clearSelection}
             />
           ) : null}
+          <DemoDataPanel
+            open={demoOpen}
+            shipments={shipments}
+            selected={selected}
+            onClose={() => setDemoOpen(false)}
+            onApplied={applyDemoShipments}
+            onDeleted={removeDemoShipments}
+            onVerify={verifyDemoData}
+          />
         </section>
 
         <ChatPanel
+          key={chatRevision}
           onSearch={runSemanticSearch}
           selectedNumber={selected?.shipment_number ?? null}
           onSelect={(shipment) => selectShipment(shipment, true)}
           onLocate={locateShipment}
           onShowAll={showAllShipments}
+          queryRequest={queryRequest}
         />
       </main>
 

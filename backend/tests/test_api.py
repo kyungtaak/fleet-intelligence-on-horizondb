@@ -1,6 +1,7 @@
 import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,7 +10,7 @@ from app.config import Settings
 from app.main import create_app
 from app.models import ShipmentCreate, ShipmentFilters, ShipmentStatus, ShipmentUpdate
 from app.progress import report_progress, stream_chat
-from app.repository import PostgresShipmentRepository
+from app.repository import DemoEmbeddingPendingError, PostgresShipmentRepository
 from app.search_locations import LOCATION_COORDINATES
 
 
@@ -194,6 +195,52 @@ def test_create_and_update_shipment_endpoints(
     assert empty.status_code == 422
 
 
+def test_bulk_create_and_embedding_status_endpoints(
+    live_settings,
+    fake_repository,
+    fake_agent_client,
+) -> None:
+    base_payload = {
+        "title": "Cold-chain Demo Cargo",
+        "description": "Temperature-controlled medicine for pipeline demonstration.",
+        "origin_name": "Seoul, South Korea",
+        "origin": {"latitude": 37.5665, "longitude": 126.978},
+        "destination_name": "Nairobi, Kenya",
+        "destination": {"latitude": -1.2921, "longitude": 36.8219},
+        "current_location_name": "Dubai, UAE",
+        "current_position": {"latitude": 25.2048, "longitude": 55.2708},
+        "status": "in_transit",
+        "eta": "2026-10-01",
+        "metadata": {"tags": ["cold-chain", "pipeline-demo"]},
+    }
+    payloads = [
+        {**base_payload, "shipment_number": f"SHIP-{9100 + index}"}
+        for index in range(20)
+    ]
+    with make_client(live_settings, fake_repository, fake_agent_client) as client:
+        created = client.post("/api/shipments/bulk", json={"shipments": payloads})
+        duplicate = client.post("/api/shipments/bulk", json={"shipments": payloads})
+        too_many = client.post(
+            "/api/shipments/bulk",
+            json={"shipments": [*payloads, {**base_payload, "shipment_number": "SHIP-9200"}]},
+        )
+        embedding_status = client.get(
+            "/api/shipments/embedding-status",
+            params=[
+                ("shipment_number", "ship-9100"),
+                ("shipment_number", "SHIP-9101"),
+            ],
+        )
+
+    assert created.status_code == 201
+    assert len(created.json()) == 20
+    assert duplicate.status_code == 409
+    assert too_many.status_code == 422
+    assert embedding_status.status_code == 200
+    assert embedding_status.json()["total"] == 2
+    assert embedding_status.json()["pending"] == 2
+
+
 async def test_repository_writes_use_postgis_and_fixed_patch_fields(
     live_settings,
     fake_repository,
@@ -243,6 +290,55 @@ async def test_repository_writes_use_postgis_and_fixed_patch_fields(
         assert "current_position = public.ST_SetSRID" in patch_sql.as_string()
         assert "title =" not in patch_sql.as_string()
         assert patch_parameters == [2.5, 1.25, sample.shipment_number]
+
+
+def test_demo_delete_endpoint(live_settings, fake_repository, fake_agent_client):
+    shipment_id = uuid4()
+    fake_repository.delete_demo_shipments = AsyncMock(return_value=[shipment_id])
+    with make_client(live_settings, fake_repository, fake_agent_client) as client:
+        response = client.request(
+            "DELETE", "/api/shipments/demo", json={"shipment_ids": [str(shipment_id)]},
+        )
+        assert response.status_code == 200
+        assert response.json() == [str(shipment_id)]
+        fake_repository.delete_demo_shipments.assert_awaited_once_with([shipment_id])
+        assert client.request(
+            "DELETE", "/api/shipments/demo", json={"shipment_ids": []},
+        ).status_code == 422
+        assert client.request(
+            "DELETE", "/api/shipments/demo", json={"shipment_ids": ["invalid"]},
+        ).status_code == 422
+        fake_repository.delete_demo_shipments.side_effect = DemoEmbeddingPendingError()
+        assert client.request(
+            "DELETE", "/api/shipments/demo", json={"shipment_ids": [str(shipment_id)]},
+        ).status_code == 409
+
+
+@pytest.mark.parametrize("pending", [False, True])
+async def test_demo_delete_repository_checks_markers_and_pending(live_settings, pending):
+    demo_id, ordinary_id = uuid4(), uuid4()
+    with patch("app.repository.AsyncConnectionPool") as pool_factory:
+        connection = MagicMock()
+        cursor = AsyncMock()
+        cursor.fetchall.side_effect = [[{"id": demo_id}], [{"id": demo_id}]]
+        cursor.fetchone.return_value = {"pending": pending}
+        connection.execute = AsyncMock(return_value=cursor)
+        pool_factory.return_value.connection.return_value.__aenter__.return_value = connection
+        repository = PostgresShipmentRepository(live_settings)
+        if pending:
+            with pytest.raises(DemoEmbeddingPendingError):
+                await repository.delete_demo_shipments([demo_id, ordinary_id])
+            assert connection.execute.await_count == 2
+        else:
+            assert await repository.delete_demo_shipments([demo_id, ordinary_id]) == [demo_id]
+            delete_sql, parameters = connection.execute.await_args.args
+            assert "DELETE FROM horizon_ship.shipments" in delete_sql
+            assert parameters == ([demo_id],)
+        select_sql = connection.execute.await_args_list[0].args[0]
+        assert '"demo_run": true' in select_sql
+        assert '"tags": ["pipeline-demo"]' in select_sql
+        assert "FOR UPDATE" in select_sql
+        assert connection.transaction.call_count == 1
 
 
 def test_startup_rejects_missing_live_configuration() -> None:

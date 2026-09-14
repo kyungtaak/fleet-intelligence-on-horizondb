@@ -80,6 +80,32 @@ class ShipmentUpdate(BaseModel):
         return self
 
 
+class ShipmentBulkCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    shipments: list[ShipmentCreate] = Field(min_length=1, max_length=20)
+
+
+class DemoShipmentDelete(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    shipment_ids: list[UUID] = Field(min_length=1, max_length=3000)
+
+
+class ShipmentEmbeddingState(BaseModel):
+    shipment_number: str
+    requested_version: int | None = None
+    embedded_version: int | None = None
+    state: Literal["pending", "ready"]
+
+
+class ShipmentEmbeddingStatus(BaseModel):
+    total: int
+    ready: int
+    pending: int
+    shipments: list[ShipmentEmbeddingState]
+
+
 class SearchRequest(BaseModel):
     query: str = Field(min_length=2, max_length=300)
     status: ShipmentStatus | None = None

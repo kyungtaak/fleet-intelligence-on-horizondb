@@ -33,6 +33,29 @@ export interface Shipment {
   remaining_distance_km: number | null
 }
 
+export type ShipmentCreateInput = Omit<
+  Shipment,
+  'id' | 'updated_at' | 'similarity' | 'remaining_distance_km'
+>
+
+export type ShipmentUpdateInput = Partial<
+  Omit<ShipmentCreateInput, 'shipment_number'>
+>
+
+export interface ShipmentEmbeddingState {
+  shipment_number: string
+  requested_version: number | null
+  embedded_version: number | null
+  state: 'pending' | 'ready'
+}
+
+export interface ShipmentEmbeddingStatus {
+  total: number
+  ready: number
+  pending: number
+  shipments: ShipmentEmbeddingState[]
+}
+
 export interface DatabaseCapabilities {
   mode: 'horizondb'
   connected: boolean

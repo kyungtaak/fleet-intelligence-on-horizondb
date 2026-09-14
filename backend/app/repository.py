@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from time import monotonic
 from typing import Any, Protocol
+from uuid import UUID
 
 from psycopg import AsyncConnection, errors, sql
 from psycopg.rows import dict_row
@@ -19,6 +20,8 @@ from app.models import (
     DatabaseCapabilities,
     Shipment,
     ShipmentCreate,
+    ShipmentEmbeddingState,
+    ShipmentEmbeddingStatus,
     ShipmentFilters,
     ShipmentSearchResult,
     ShipmentStats,
@@ -91,9 +94,19 @@ class ShipmentRepository(Protocol):
 
     async def create_shipment(self, shipment: ShipmentCreate) -> Shipment: ...
 
+    async def create_shipments(
+        self, shipments: list[ShipmentCreate],
+    ) -> list[Shipment]: ...
+
+    async def delete_demo_shipments(self, shipment_ids: list[UUID]) -> list[UUID]: ...
+
     async def update_shipment(
         self, shipment_number: str, shipment: ShipmentUpdate,
     ) -> Shipment | None: ...
+
+    async def embedding_status(
+        self, shipment_numbers: list[str],
+    ) -> ShipmentEmbeddingStatus: ...
 
     async def stats(self) -> ShipmentStats: ...
 
@@ -101,6 +114,10 @@ class ShipmentRepository(Protocol):
 
 
 class ShipmentAlreadyExistsError(Exception):
+    pass
+
+
+class DemoEmbeddingPendingError(Exception):
     pass
 
 
@@ -135,6 +152,56 @@ def _row_to_shipment(row: Mapping[str, Any]) -> Shipment:
             float(row["remaining_distance_km"])
             if row.get("remaining_distance_km") is not None else None
         ),
+    )
+
+
+_CREATE_SHIPMENT_SQL = f"""
+INSERT INTO horizon_ship.shipments AS s (
+    shipment_number,
+    title,
+    description,
+    origin_name,
+    origin_position,
+    destination_name,
+    destination_position,
+    current_location_name,
+    current_position,
+    status,
+    eta,
+    updated_at,
+    metadata
+)
+VALUES (
+    %s, %s, %s, %s,
+    public.ST_SetSRID(public.ST_MakePoint(%s, %s), 4326),
+    %s,
+    public.ST_SetSRID(public.ST_MakePoint(%s, %s), 4326),
+    %s,
+    public.ST_SetSRID(public.ST_MakePoint(%s, %s), 4326),
+    %s, %s, clock_timestamp(), %s
+)
+RETURNING
+{_SHIPMENT_COLUMNS};
+"""
+
+
+def _shipment_create_parameters(shipment: ShipmentCreate) -> tuple[Any, ...]:
+    return (
+        shipment.shipment_number,
+        shipment.title,
+        shipment.description,
+        shipment.origin_name,
+        shipment.origin.longitude,
+        shipment.origin.latitude,
+        shipment.destination_name,
+        shipment.destination.longitude,
+        shipment.destination.latitude,
+        shipment.current_location_name,
+        shipment.current_position.longitude,
+        shipment.current_position.latitude,
+        shipment.status.value,
+        shipment.eta,
+        Jsonb(shipment.metadata),
     )
 
 
@@ -400,58 +467,31 @@ WHERE s.shipment_number = %s;
         return _row_to_shipment(row) if row else None
 
     async def create_shipment(self, shipment: ShipmentCreate) -> Shipment:
-        query = f"""
-INSERT INTO horizon_ship.shipments AS s (
-    shipment_number,
-    title,
-    description,
-    origin_name,
-    origin_position,
-    destination_name,
-    destination_position,
-    current_location_name,
-    current_position,
-    status,
-    eta,
-    updated_at,
-    metadata
-)
-VALUES (
-    %s, %s, %s, %s,
-    public.ST_SetSRID(public.ST_MakePoint(%s, %s), 4326),
-    %s,
-    public.ST_SetSRID(public.ST_MakePoint(%s, %s), 4326),
-    %s,
-    public.ST_SetSRID(public.ST_MakePoint(%s, %s), 4326),
-    %s, %s, clock_timestamp(), %s
-)
-RETURNING
-{_SHIPMENT_COLUMNS};
-"""
-        parameters = (
-            shipment.shipment_number,
-            shipment.title,
-            shipment.description,
-            shipment.origin_name,
-            shipment.origin.longitude,
-            shipment.origin.latitude,
-            shipment.destination_name,
-            shipment.destination.longitude,
-            shipment.destination.latitude,
-            shipment.current_location_name,
-            shipment.current_position.longitude,
-            shipment.current_position.latitude,
-            shipment.status.value,
-            shipment.eta,
-            Jsonb(shipment.metadata),
-        )
         try:
             async with self._pool.connection() as connection, connection.transaction():
-                cursor = await connection.execute(query, parameters)
+                cursor = await connection.execute(
+                    _CREATE_SHIPMENT_SQL, _shipment_create_parameters(shipment),
+                )
                 row = await cursor.fetchone()
         except errors.UniqueViolation as exc:
             raise ShipmentAlreadyExistsError(shipment.shipment_number) from exc
         return _row_to_shipment(row)
+
+    async def create_shipments(
+        self,
+        shipments: list[ShipmentCreate],
+    ) -> list[Shipment]:
+        rows: list[Mapping[str, Any]] = []
+        try:
+            async with self._pool.connection() as connection, connection.transaction():
+                for shipment in shipments:
+                    cursor = await connection.execute(
+                        _CREATE_SHIPMENT_SQL, _shipment_create_parameters(shipment),
+                    )
+                    rows.append(await cursor.fetchone())
+        except errors.UniqueViolation as exc:
+            raise ShipmentAlreadyExistsError("bulk shipment insert") from exc
+        return [_row_to_shipment(row) for row in rows]
 
     async def update_shipment(
         self,
@@ -511,6 +551,42 @@ RETURNING
             row = await cursor.fetchone()
         return _row_to_shipment(row) if row else None
 
+    async def delete_demo_shipments(self, shipment_ids: list[UUID]) -> list[UUID]:
+        async with self._pool.connection() as connection, connection.transaction():
+            cursor = await connection.execute(
+                """
+SELECT id
+FROM horizon_ship.shipments
+WHERE id = ANY(%s)
+    AND metadata @> '{"demo_run": true, "tags": ["pipeline-demo"]}'::jsonb
+FOR UPDATE;
+""",
+                (shipment_ids,),
+            )
+            eligible_ids = [row["id"] for row in await cursor.fetchall()]
+            if not eligible_ids:
+                return []
+            cursor = await connection.execute(
+                """
+SELECT EXISTS (
+    SELECT 1
+    FROM horizon_ship.shipment_embedding_jobs AS job
+    LEFT JOIN horizon_ship.shipment_embeddings AS embedding
+        ON embedding.shipment_id = job.shipment_id
+    WHERE job.shipment_id = ANY(%s)
+        AND embedding.content_version IS DISTINCT FROM job.content_version
+) AS pending;
+""",
+                (eligible_ids,),
+            )
+            if (await cursor.fetchone())["pending"]:
+                raise DemoEmbeddingPendingError()
+            cursor = await connection.execute(
+                "DELETE FROM horizon_ship.shipments WHERE id = ANY(%s) RETURNING id;",
+                (eligible_ids,),
+            )
+            return [row["id"] for row in await cursor.fetchall()]
+
     async def stats(self) -> ShipmentStats:
         query = """
 SELECT status, count(*) AS count
@@ -529,6 +605,51 @@ ORDER BY status;
                 StatusCount(status=status, count=counts.get(status, 0))
                 for status in ShipmentStatus
             ],
+        )
+
+    async def embedding_status(
+        self,
+        shipment_numbers: list[str],
+    ) -> ShipmentEmbeddingStatus:
+        query = """
+SELECT
+    shipment.shipment_number,
+    job.content_version AS requested_version,
+    embedding.content_version AS embedded_version
+FROM horizon_ship.shipments AS shipment
+LEFT JOIN horizon_ship.shipment_embedding_jobs AS job
+    ON job.shipment_id = shipment.id
+LEFT JOIN horizon_ship.shipment_embeddings AS embedding
+    ON embedding.shipment_id = shipment.id
+WHERE shipment.shipment_number = ANY(%s)
+ORDER BY shipment.shipment_number;
+"""
+        async with self._pool.connection() as connection:
+            cursor = await connection.execute(query, (shipment_numbers,))
+            rows = await cursor.fetchall()
+        states = [
+            ShipmentEmbeddingState(
+                shipment_number=row["shipment_number"],
+                requested_version=row["requested_version"],
+                embedded_version=row["embedded_version"],
+                state=(
+                    "ready"
+                    if row["embedded_version"] is not None
+                    and (
+                        row["requested_version"] is None
+                        or row["requested_version"] == row["embedded_version"]
+                    )
+                    else "pending"
+                ),
+            )
+            for row in rows
+        ]
+        ready = sum(state.state == "ready" for state in states)
+        return ShipmentEmbeddingStatus(
+            total=len(states),
+            ready=ready,
+            pending=len(states) - ready,
+            shipments=states,
         )
 
     async def capabilities(self) -> DatabaseCapabilities:

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -59,6 +59,7 @@ interface ChatPanelProps {
   onSelect: (shipment: Shipment) => void
   onLocate: (shipment: Shipment) => void
   onShowAll: () => void
+  queryRequest: { id: number; query: string } | null
 }
 
 const initialMessage: ChatMessage = {
@@ -67,7 +68,7 @@ const initialMessage: ChatMessage = {
   text: '안녕하세요. 어떤 배송을 확인해 드릴까요?',
 }
 
-export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShowAll }: ChatPanelProps) {
+export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShowAll, queryRequest }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([initialMessage])
   const [input, setInput] = useState('')
   const [searching, setSearching] = useState(false)
@@ -76,8 +77,19 @@ export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShow
   const activeRequest = useRef<AbortController | null>(null)
   const [progress, setProgress] = useState<SearchProgress[]>([])
   const [startedAt, setStartedAt] = useState(0)
+  const lastQueryRequest = useRef(0)
+
+  const submitExternalQuery = useEffectEvent((query: string) => {
+    void submitQuery(query, performance.now())
+  })
 
   useEffect(() => () => activeRequest.current?.abort(), [])
+
+  useEffect(() => {
+    if (!queryRequest || queryRequest.id === lastQueryRequest.current) return
+    lastQueryRequest.current = queryRequest.id
+    submitExternalQuery(queryRequest.query)
+  }, [queryRequest])
 
   useEffect(() => {
     messageEnd.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })

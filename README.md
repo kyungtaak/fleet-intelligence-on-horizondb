@@ -710,9 +710,40 @@ CREATE INDEX shipments_embedding_diskann_idx
 | `GET` | `/api/health` | 데이터베이스, 확장 기능, 임베딩, 어시스턴트 준비 상태 확인 |
 | `GET` | `/api/shipments` | 배송 목록 조회, 선택적으로 상태·텍스트 필터 적용 |
 | `GET` | `/api/shipments/stats` | 상태별 배송 건수 조회 |
+| `GET` | `/api/shipments/embedding-status` | 배송별 pipeline 요청 version과 검색 가능한 embedding version 비교 |
 | `GET` | `/api/shipments/{number}` | 배송 상세 정보와 PostGIS 좌표 조회 |
+| `POST` | `/api/shipments` | 배송 1건 추가 |
+| `POST` | `/api/shipments/bulk` | 최대 20건을 한 transaction으로 추가 |
+| `DELETE` | `/api/shipments/demo` | 요청한 ID 중 데모 표식이 있는 배송만 삭제. embedding 처리 중이면 409 반환 |
+| `PATCH` | `/api/shipments/{number}` | 선택한 배송의 상태, 위치, 좌표, ETA, metadata 수정 |
 | `POST` | `/api/search` | 코사인 거리 기반 벡터 검색 직접 실행 |
 | `POST` | `/api/chat` | Agent Framework 답변과 근거가 된 배송 레코드 반환 |
+| `POST` | `/api/chat/stream` | 검색 실행 내역과 Agent Framework 응답을 NDJSON으로 전송 |
+
+배송 목록 제목 옆 데이터 입력 버튼을 누르면 단건 update·insert와 20건 bulk insert를 실행할 수 있습니다.
+의미 필드가 바뀐 배송은 DB 반영, embedding 대기, 검색 가능 순서로 상태를 표시합니다.
+좌표만 바꿀 때는 PostGIS 위치만 갱신하며 embedding을 다시 만들지 않습니다. Bulk insert가 끝나면
+`새 콜드체인 화물 검색`, `인도적 지원 물품 찾기`, `재생에너지 배송 보기`로 새 데이터를 검색할 수 있습니다.
+
+### 벌크 데모 순서
+
+1. 전체 배송 건수를 확인한 뒤 데이터 입력 패널에서 **벌크 20건 → 20건 추가**를 누릅니다.
+2. 전체 건수가 20 증가하고, 목록에 새 `SHIP-7xxx` 배송 번호가 생기는지 확인합니다.
+  번호는 비어 있는 SHIP-7000부터 할당하며, 7000번대가 모두 사용 중이면 더 큰 번호를 사용합니다.
+  카테고리별 배송이 같은 좌표를 사용할 수 있으므로 marker 수를 배송 건수로 보지 않습니다.
+3. **20 / 20건 embedding 반영 완료**를 기다립니다. 진행률은 실제 DB 조회 결과이며,
+  처리가 빠르면 중간 숫자 없이 바로 완료될 수 있습니다.
+4. 한국어 검증 검색 버튼을 누르고 실행 내역의 의미 검색 및 새 배송 번호를 확인합니다.
+  검색은 전체 배송을 대상으로 하며 새 배송만 필터링하지 않습니다. 기본 상위 8건에 기존 배송도
+  포함될 수 있으므로 검색 결과 수와 pipeline 완료 건수는 별도로 확인합니다.
+5. 다시 **벌크 20건** 탭을 열고 하단 **데모 데이터 N건** 옆 휴지통을 누릅니다.
+  삭제 건수를 확인한 뒤 **N건 삭제**를 누르면 해당 배송과 연결된 job·embedding을 함께 삭제합니다.
+
+삭제 API는 요청한 UUID와 `metadata.demo_run: true`, `pipeline-demo` 태그를 모두 검사합니다.
+확인창을 연 뒤 다른 화면에서 생성된 배송은 이 요청에 포함되지 않습니다. 기존 배송은 유지하며,
+단건 update로 변경한 기존 배송을 원래 값으로 복원하지는 않습니다. 삭제 후에는 목록·지도·통계를
+갱신하고 이전 채팅 결과를 초기화합니다. 다른 데모 데이터가 없었다면 전체 건수는 시작 값으로 돌아갑니다.
+처리 중에는 삭제를 막으며, 대기 시간이 초과됐더라도 서버의 version 비교에서 아직 pending이면 삭제하지 않습니다.
 
 ## 테스트와 코드 검사
 

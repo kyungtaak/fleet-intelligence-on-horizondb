@@ -1,4 +1,4 @@
-import { RefreshCw, Search, SlidersHorizontal } from 'lucide-react'
+import { DatabaseZap, RefreshCw, Search, SlidersHorizontal } from 'lucide-react'
 import type { Shipment, ShipmentStatus } from '../types'
 import { STATUS_COLORS, STATUS_LABELS } from '../shipmentStatus'
 
@@ -16,6 +16,7 @@ interface ShipmentListProps {
   onSelect: (shipment: Shipment) => void
   onRefresh: () => void
   onReset: () => void
+  onOpenDemo: () => void
 }
 
 export function ShipmentList({
@@ -30,6 +31,7 @@ export function ShipmentList({
   onSelect,
   onRefresh,
   onReset,
+  onOpenDemo,
 }: ShipmentListProps) {
   return (
     <aside className="shipment-panel workspace-panel" aria-label="Shipments">
@@ -38,9 +40,20 @@ export function ShipmentList({
           <span className="eyebrow">Fleet overview</span>
           <h2>Shipments</h2>
         </div>
-        <span className="count-badge" aria-label={`${total} total shipments`}>
-          {total}
-        </span>
+        <div className="shipment-heading-actions">
+          <span className="count-badge" aria-label={`${total} total shipments`}>
+            {total}
+          </span>
+          <button
+            className="icon-button"
+            type="button"
+            title="데모 데이터 입력"
+            aria-label="데모 데이터 입력"
+            onClick={onOpenDemo}
+          >
+            <DatabaseZap size={17} />
+          </button>
+        </div>
       </div>
 
       <div className="shipment-filters">

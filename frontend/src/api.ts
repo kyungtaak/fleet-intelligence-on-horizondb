@@ -3,8 +3,11 @@ import type {
   SearchResponse,
   SearchProgress,
   Shipment,
+  ShipmentCreateInput,
+  ShipmentEmbeddingStatus,
   ShipmentStats,
   ShipmentStatus,
+  ShipmentUpdateInput,
 } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '')
@@ -40,6 +43,49 @@ export function getShipments(): Promise<Shipment[]> {
 
 export function getShipmentStats(): Promise<ShipmentStats> {
   return apiRequest('/api/shipments/stats')
+}
+
+export function createShipment(shipment: ShipmentCreateInput): Promise<Shipment> {
+  return apiRequest('/api/shipments', {
+    method: 'POST',
+    body: JSON.stringify(shipment),
+  })
+}
+
+export function createShipments(
+  shipments: ShipmentCreateInput[],
+): Promise<Shipment[]> {
+  return apiRequest('/api/shipments/bulk', {
+    method: 'POST',
+    body: JSON.stringify({ shipments }),
+  })
+}
+
+export function deleteDemoShipments(shipmentIds: string[]): Promise<string[]> {
+  return apiRequest('/api/shipments/demo', {
+    method: 'DELETE',
+    body: JSON.stringify({ shipment_ids: shipmentIds }),
+  })
+}
+
+export function updateShipment(
+  shipmentNumber: string,
+  shipment: ShipmentUpdateInput,
+): Promise<Shipment> {
+  return apiRequest(`/api/shipments/${encodeURIComponent(shipmentNumber)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(shipment),
+  })
+}
+
+export function getEmbeddingStatus(
+  shipmentNumbers: string[],
+): Promise<ShipmentEmbeddingStatus> {
+  const search = new URLSearchParams()
+  shipmentNumbers.forEach((shipmentNumber) => {
+    search.append('shipment_number', shipmentNumber)
+  })
+  return apiRequest(`/api/shipments/embedding-status?${search.toString()}`)
 }
 
 export async function searchShipments(
