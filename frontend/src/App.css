@@ -825,6 +825,40 @@
 .bulk-operation p { margin: 5px 0 0; color: var(--ink-muted); font-size: 10px; line-height: 1.5; }
 .bulk-operation .demo-run-button { grid-column: 1 / -1; }
 
+.bulk-preview,
+.bulk-draft-error { grid-column: 1 / -1; min-width: 0; }
+.bulk-preview { border-block: 1px solid var(--line); }
+.bulk-preview summary {
+  padding: 10px 0;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.bulk-preview summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.bulk-preview-scroll { max-height: 280px; overflow: auto; overscroll-behavior: contain; }
+.bulk-preview table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+.bulk-preview th,
+.bulk-preview td {
+  padding: 8px 5px;
+  border-bottom: 1px solid var(--line);
+  font-size: 10px;
+  line-height: 1.5;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  letter-spacing: 0;
+}
+.bulk-preview th { position: sticky; top: 0; z-index: 1; background: var(--surface-muted); color: var(--ink-muted); }
+.bulk-preview th:first-child { width: 42%; }
+.bulk-preview th:nth-child(2) { width: 35%; }
+.bulk-preview th:last-child { width: 23%; }
+.bulk-preview td > span:not(.status-badge),
+.bulk-preview td > small { display: block; }
+.bulk-preview td > small { margin-bottom: 3px; font: 9px/1.5 var(--font-mono); color: var(--ink-muted); }
+.bulk-preview td > svg { display: block; margin-block: 3px; color: var(--ink-muted); }
+.bulk-preview .status-badge { white-space: normal; }
+
 .pipeline-activity {
   display: grid;
   gap: 12px;

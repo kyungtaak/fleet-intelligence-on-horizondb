@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  ArrowRight,
   Check,
   CircleAlert,
   DatabaseZap,
@@ -20,7 +21,8 @@ import {
 } from '../api'
 import { buildDemoShipments, buildUpdate } from '../demoData'
 import type { UpdateScenario } from '../demoData'
-import type { Shipment, ShipmentEmbeddingStatus } from '../types'
+import type { Shipment, ShipmentCreateInput, ShipmentEmbeddingStatus } from '../types'
+import { StatusBadge } from './StatusBadge'
 
 type PanelMode = 'single' | 'bulk'
 type SingleAction = 'update' | 'insert'
@@ -97,6 +99,9 @@ export function DemoDataPanel({
   const [deleteIds, setDeleteIds] = useState<string[] | null>(null)
   const [cleanupMessage, setCleanupMessage] = useState<string | null>(null)
   const [cleanupError, setCleanupError] = useState<string | null>(null)
+  const [bulkDraft, setBulkDraft] = useState<ShipmentCreateInput[] | null>(null)
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const [draftError, setDraftError] = useState<string | null>(null)
 
   useEffect(() => () => {
     pollToken.current += 1
@@ -118,6 +123,8 @@ export function DemoDataPanel({
       setActivity('idle')
       setEmbeddingStatus(null)
       setDeleteIds(null)
+      setBulkDraft(null)
+      setPreviewOpen(false)
       setCleanupMessage(`데모 배송 ${deleted.length}건을 삭제했습니다.`)
       onDeleted(deleted)
     } catch (deleteError) {
@@ -194,10 +201,22 @@ export function DemoDataPanel({
     }
   }
 
+  function prepareBulk() {
+    try {
+      setBulkDraft(buildDemoShipments(shipments, 20))
+      setDraftError(null)
+    } catch (prepareError) {
+      setDraftError(prepareError instanceof Error ? prepareError.message : '배송 목록을 준비하지 못했습니다.')
+    }
+  }
+
   async function runBulk() {
+    if (!bulkDraft || busy) return
     begin('데모 배송 20건 추가')
     try {
-      const created = await createShipments(buildDemoShipments(shipments, 20))
+      const created = await createShipments(bulkDraft)
+      setBulkDraft(null)
+      setPreviewOpen(false)
       onApplied(created, null)
       await trackEmbedding(created.map((shipment) => shipment.shipment_number))
     } catch (operationError) {
@@ -246,7 +265,10 @@ export function DemoDataPanel({
           <button
             type="button"
             className={mode === 'bulk' ? 'active' : ''}
-            onClick={() => setMode('bulk')}
+            onClick={() => {
+              setMode('bulk')
+              if (!bulkDraft) prepareBulk()
+            }}
             disabled={busy}
           >
             <Layers3 size={15} />
@@ -314,16 +336,49 @@ export function DemoDataPanel({
             <div className="bulk-number">20</div>
             <div>
               <strong>검색용 배송 데이터</strong>
-              <p>콜드체인, 인도적 지원, 재생에너지, 반도체 화물을 각 5건씩 한 transaction으로 추가합니다.</p>
+              <p>콜드체인 · 인도적 지원 · 재생에너지 · 반도체<br />4개 카테고리 × 5건</p>
             </div>
+            {bulkDraft ? (
+              <details
+                className="bulk-preview"
+                open={previewOpen}
+                onToggle={(event) => setPreviewOpen(event.currentTarget.open)}
+              >
+                <summary>추가할 배송 {bulkDraft.length}건</summary>
+                <div className="bulk-preview-scroll" role="region" aria-label="추가할 배송 목록" tabIndex={0}>
+                  <table>
+                    <thead><tr><th scope="col">화물</th><th scope="col">출발 / 도착</th><th scope="col">상태</th></tr></thead>
+                    <tbody>
+                      {bulkDraft.map((shipment) => (
+                        <tr key={shipment.shipment_number}>
+                          <td><small>{shipment.shipment_number}</small><span>{shipment.title}</span></td>
+                          <td>
+                            <span>{shipment.origin_name}</span>
+                            <ArrowRight size={12} aria-label="도착지" />
+                            <span>{shipment.destination_name}</span>
+                          </td>
+                          <td>
+                            <StatusBadge status={shipment.status} compact label={{
+                              in_transit: '운송 중', delayed: '지연', exception: '문제 발생',
+                              delivered: '배송 완료', unknown: '미확인',
+                            }[shipment.status]} />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            ) : null}
+            {draftError ? <p className="bulk-draft-error" role="alert">{draftError}</p> : null}
             <button
               className="demo-run-button"
               type="button"
               disabled={busy}
-              onClick={() => void runBulk()}
+              onClick={() => bulkDraft ? void runBulk() : prepareBulk()}
             >
               {busy ? <LoaderCircle className="spin" size={16} /> : <Layers3 size={16} />}
-              20건 추가
+              {bulkDraft || busy ? '20건 추가' : '다음 20건 준비'}
             </button>
           </section>
         )}
