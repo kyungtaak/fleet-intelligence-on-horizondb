@@ -226,10 +226,15 @@ export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShow
                         message.filters.destination_name && `도착지: ${message.filters.destination_name}`,
                         message.filters.nearby_location && `${{ origin: '출발', destination: '도착', current: '현재' }[message.filters.position_field]} 위치: ${message.filters.nearby_location} 반경 ${message.filters.radius_km}km`,
                         message.filters.cargo_query && `화물 검색어: ${message.filters.cargo_query}`,
+                        message.filters.sort_by === 'destination_distance' && '정렬: 현재 위치에서 각 목적지까지 가까운 순',
+                        message.filters.sort_by === 'destination_distance' && !message.filters.status && '배송 완료 제외',
+                        message.filters.result_limit && `요청: ${message.filters.result_limit}건`,
                       ].filter(Boolean).join(' · ')}
                     </span>
                   ) : null}
-                  {message.hasMore ? <span>표시되지 않은 결과가 더 있습니다. 조건을 좁혀 주세요.</span> : null}
+                  {message.hasMore ? <span>{message.filters?.sort_by === 'destination_distance'
+                    ? '가까운 순으로 일부 결과만 표시했습니다.'
+                    : '표시되지 않은 결과가 더 있습니다. 조건을 좁혀 주세요.'}</span> : null}
                 </div>
               ) : null}
               {messageIndex === 0 ? (
@@ -269,6 +274,12 @@ export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShow
                         <ArrowRight size={12} aria-hidden="true" />
                         <span>{shipment.destination_name}</span>
                       </div>
+                      {shipment.remaining_distance_km != null ? (
+                        <p className="chat-result-distance">
+                          목적지까지 {shipment.remaining_distance_km.toLocaleString('ko-KR', { maximumFractionDigits: 1 })} km
+                          <br />지표면 최단거리
+                        </p>
+                      ) : null}
                       </button>
                       <div className="chat-result-footer">
                         <span>

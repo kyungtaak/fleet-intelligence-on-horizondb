@@ -118,6 +118,10 @@ def _row_to_shipment(row: Mapping[str, Any]) -> Shipment:
         updated_at=row["updated_at"],
         metadata=row["metadata"],
         similarity=round(float(similarity), 4) if similarity is not None else None,
+        remaining_distance_km=(
+            float(row["remaining_distance_km"])
+            if row.get("remaining_distance_km") is not None else None
+        ),
     )
 
 
@@ -240,6 +244,7 @@ ORDER BY s.shipment_number;
         self, filters: ShipmentFilters, limit: int,
     ) -> ShipmentSearchResult:
         validate_filters(filters)
+        limit = min(limit, filters.result_limit or limit)
         rows = await self._search_rows(filters, limit + 1)
         exact_conditions = any((
             filters.status, filters.shipment_number, filters.origin_region,
@@ -249,7 +254,7 @@ ORDER BY s.shipment_number;
         mode = (
             "hybrid" if filters.cargo_query and exact_conditions
             else "diskann_cosine" if filters.cargo_query
-            else "gis" if any((filters.nearby_location, filters.origin_region, filters.destination_region))
+            else "gis" if any((filters.nearby_location, filters.origin_region, filters.destination_region, filters.sort_by))
             else "sql"
         )
         return ShipmentSearchResult(
@@ -263,7 +268,16 @@ ORDER BY s.shipment_number;
         vector_cte = ""
         vector_join = ""
         similarity = "NULL::double precision"
+        remaining_distance = "NULL::double precision"
         ordering = "s.shipment_number"
+        if filters.sort_by == "destination_distance":
+            if filters.cargo_query:
+                raise ValueError("Destination distance sorting cannot be combined with cargo relevance")
+            remaining_distance = (
+                "public.ST_Distance(s.current_position::public.geography, "
+                "s.destination_position::public.geography) / 1000.0"
+            )
+            ordering = "remaining_distance_km ASC, s.shipment_number ASC"
         if filters.cargo_query:
             report_progress(
                 "embedding", "화물 검색어를 임베딩 API에 전달하고 있습니다.",
@@ -287,6 +301,9 @@ ORDER BY s.shipment_number;
         status_value = filters.status.value if filters.status else None
         conditions = ["(%s::text IS NULL OR s.status = %s)"]
         parameters.extend((status_value, status_value))
+        if filters.sort_by == "destination_distance" and filters.status is None:
+            conditions.append("s.status <> %s")
+            parameters.append(ShipmentStatus.DELIVERED.value)
         for column, value in (
             ("shipment_number", filters.shipment_number),
             ("origin_name", filters.origin_name),
@@ -321,7 +338,8 @@ ORDER BY s.shipment_number;
 {vector_cte}
 SELECT
 {_SHIPMENT_COLUMNS},
-    {similarity} AS similarity
+    {similarity} AS similarity,
+    {remaining_distance} AS remaining_distance_km
 FROM horizon_ship.shipments AS s
 {vector_join}
 WHERE {' AND '.join(conditions)}

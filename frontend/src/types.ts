@@ -30,6 +30,7 @@ export interface Shipment {
     [key: string]: unknown
   }
   similarity: number | null
+  remaining_distance_km: number | null
 }
 
 export interface DatabaseCapabilities {
@@ -77,6 +78,8 @@ export interface SearchResponse {
     nearby_location: string | null
     position_field: 'origin' | 'destination' | 'current'
     radius_km: number | null
+    sort_by: 'destination_distance' | null
+    result_limit: number | null
   } | null
 }
 

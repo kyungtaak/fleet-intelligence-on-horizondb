@@ -35,6 +35,7 @@ class Shipment(BaseModel):
     updated_at: datetime
     metadata: dict[str, Any] = Field(default_factory=dict)
     similarity: float | None = Field(default=None, ge=-1, le=1)
+    remaining_distance_km: float | None = Field(default=None, ge=0)
 
 
 class SearchRequest(BaseModel):
@@ -56,6 +57,10 @@ class ShipmentFilters(BaseModel):
     nearby_location: str | None = None
     position_field: Literal["origin", "destination", "current"] = "current"
     radius_km: float | None = Field(default=None, gt=0, le=20000)
+    sort_by: Literal["destination_distance"] | None = Field(
+        default=None, description="Rank by distance from current position to each shipment's own destination.",
+    )
+    result_limit: int | None = Field(default=None, ge=1, le=24)
 
 
 SearchMode = Literal["sql", "gis", "diskann_cosine", "hybrid"]

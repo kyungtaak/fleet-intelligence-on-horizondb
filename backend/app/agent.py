@@ -41,6 +41,7 @@ def _shipment_tool_payload(result: ShipmentSearchResult) -> str:
                     "current_location": shipment.current_location_name,
                     "eta": shipment.eta.isoformat() if shipment.eta else None,
                     "cosine_similarity": shipment.similarity,
+                    "remaining_distance_km": shipment.remaining_distance_km,
                 }
                 for shipment in result.shipments
             ],
@@ -139,10 +140,26 @@ class ShipmentAgent:
                 "Do not wrap the entire answer in a code fence or emit raw HTML. "
                 "Use exact structured filters for every explicit constraint. "
                 "Set cargo_query to null for status-only, region-only, place-only, ID, "
-                "or distance-only questions. Use it ONLY for cargo meaning such as "
+                "or distance-only questions including destination_distance sorting. Use it ONLY for cargo meaning such as "
                 "medical supplies. Never put exact constraints into cargo_query instead "
                 "of filters. An Asia origin is origin_region='Asia', not destination_region. "
                 "Example delayed shipments: filters={status:'delayed'}. "
+                "Example '목적지에 가장 가까운 2개' (also with Markdown bold): "
+                "filters={sort_by:'destination_distance',result_limit:2}. This means shortest "
+                "distance from each shipment's CURRENT position to its OWN destination; "
+                "no named city or radius is required. Do not ask for a reference city in this case. "
+                "Example '로테르담으로 가는 운송 중 배송 중 목적지에 가장 가까운 2개': "
+                "filters={destination_name:'Rotterdam, Netherlands',status:'in_transit',"
+                "sort_by:'destination_distance',result_limit:2}. "
+                "Set result_limit to the user's requested count (1..24); the request's display "
+                "limit may cap the result further. Distance sorting excludes delivered shipments "
+                "by default unless an explicit status is supplied. Explain this default when used. "
+                "Report remaining_distance_km from tool results, preserving their distance order. "
+                "This is geodesic distance, not remaining route distance or arrival time. "
+                "For '도착 임박' without an explicit distance criterion ask whether distance or ETA "
+                "is intended; ETA sorting is not supported yet. Combining cargo meaning with "
+                "destination-distance ranking is not supported; ask which ranking is intended "
+                "without calling the tool. Never silently omit either constraint. "
                 "Example medical cargo departing Asia: "
                 "filters={origin_region:'Asia',cargo_query:'medical supplies'}. "
                 "Example current position within 100km of Busan: "

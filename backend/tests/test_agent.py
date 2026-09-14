@@ -75,6 +75,8 @@ async def test_agent_framework_tool_drives_semantic_results(
     {"origin_region": "Asia"},
     {"origin_region": "Asia", "cargo_query": "medical supplies"},
     {"nearby_location": "Busan, South Korea", "radius_km": 100},
+    {"sort_by": "destination_distance", "result_limit": 2},
+    {"sort_by": "destination_distance", "result_limit": 2, "destination_name": "Rotterdam, Netherlands"},
 ])
 async def test_agent_preserves_filters_and_empty_results(live_settings, fake_repository, filters):
     effective = ShipmentFilters(**filters)
@@ -127,3 +129,13 @@ async def test_ui_status_remains_required(live_settings, fake_repository, fake_a
     )
     assert fake_repository.search_shipments.await_args.kwargs["filters"].status == "delayed"
     assert result.applied_filters.status == "delayed"
+
+
+def test_tool_payload_includes_destination_distance(fake_repository):
+    from app.agent import _shipment_tool_payload
+
+    result = ShipmentSearchResult(
+        shipments=[fake_repository._shipments[0].model_copy(update={"remaining_distance_km": 12.345})],
+        search_mode="gis", applied_filters=ShipmentFilters(sort_by="destination_distance", result_limit=2),
+    )
+    assert json.loads(_shipment_tool_payload(result))["matches"][0]["remaining_distance_km"] == 12.345

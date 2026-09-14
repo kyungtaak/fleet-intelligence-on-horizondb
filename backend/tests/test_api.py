@@ -280,6 +280,10 @@ async def test_exact_search_skips_embeddings(live_settings, filters, mode, sql_f
     {"radius_km": 100},
     {"cargo_query": "   "},
     {"position_field": "origin"},
+    {"sort_by": "destination_distance", "cargo_query": "medical supplies"},
+    {"sort_by": "eta"},
+    {"result_limit": 0},
+    {"result_limit": 25},
 ])
 async def test_invalid_conditions_fail_before_search(live_settings, values):
     with (
@@ -314,6 +318,51 @@ async def test_more_results_are_not_claimed_as_complete(live_settings, fake_repo
         assert len(result.shipments) == 8
         assert result.has_more is True
         assert result.search_mode == "gis"
+
+
+@pytest.mark.parametrize("status", [None, "in_transit", "delivered"])
+async def test_destination_distance_sort_and_limit(live_settings, status):
+    with (
+        patch("app.repository.AsyncConnectionPool") as pool_factory,
+        patch("app.repository.async_embedding_client") as embedding_factory,
+    ):
+        connection = MagicMock()
+        cursor = AsyncMock()
+        cursor.fetchall.return_value = []
+        connection.execute = AsyncMock(return_value=cursor)
+        pool_factory.return_value.connection.return_value.__aenter__.return_value = connection
+        filters = ShipmentFilters(
+            sort_by="destination_distance", result_limit=2, status=status,
+            destination_name="Rotterdam, Netherlands",
+        )
+        result = await PostgresShipmentRepository(live_settings).search_shipments(filters, 8)
+        assert result.search_mode == "gis"
+        embedding_factory.assert_not_called()
+        connection.execute.assert_awaited_once()
+        statement, parameters = connection.execute.call_args.args
+        assert "ST_Distance(s.current_position::public.geography, s.destination_position::public.geography) / 1000.0" in statement
+        assert "ORDER BY remaining_distance_km ASC, s.shipment_number ASC" in statement
+        assert "s.destination_name = %s" in statement
+        assert "<=>" not in statement
+        expected = [status, status]
+        if status is None:
+            assert "s.status <> %s" in statement
+            expected.append("delivered")
+        else:
+            assert "s.status <> %s" not in statement
+        assert parameters == [*expected, "Rotterdam, Netherlands", 3]
+
+
+@pytest.mark.parametrize("requested, expected", [(2, 2), (24, 8)])
+async def test_requested_count_respects_api_limit(live_settings, fake_repository, requested, expected):
+    with patch("app.repository.AsyncConnectionPool"):
+        repository = PostgresShipmentRepository(live_settings)
+        repository._search_rows = AsyncMock(return_value=fake_repository._shipments[:expected + 1])
+        filters = ShipmentFilters(sort_by="destination_distance", result_limit=requested)
+        result = await repository.search_shipments(filters, 8)
+        repository._search_rows.assert_awaited_once_with(filters, expected + 1)
+        assert len(result.shipments) == expected
+        assert result.has_more
 
 
 async def test_hybrid_search_keeps_exact_conditions_in_sql(live_settings):
