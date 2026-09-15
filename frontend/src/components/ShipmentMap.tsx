@@ -1,37 +1,85 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
+import { createPortal } from 'react-dom'
+import { Ship } from 'lucide-react'
 import L from 'leaflet'
 import {
   CircleMarker,
+  Circle,
   MapContainer,
   Marker,
   Polyline,
   Popup,
   TileLayer,
   useMap,
+  useMapEvents,
 } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
-import type { Shipment } from '../types'
+import type { Coordinate, Shipment } from '../types'
 import { STATUS_COLORS, STATUS_LABELS } from '../shipmentStatus'
+import { shipmentRoute } from '../shipmentRoute'
 
 interface ShipmentMapProps {
   shipments: Shipment[]
   selected: Shipment | null
   locateRequest: number | null
   onSelect: (shipment: Shipment) => void
+  searchCenter: Coordinate | null
+  searchRadiusKm: number
+  pickingCenter: boolean
+  onPickCenter: (point: Coordinate) => void
 }
 
-function markerIcon(shipment: Shipment) {
-  return L.divIcon({
-    className: 'shipment-marker-shell',
-    html: `<span class="shipment-marker-pin" style="--marker-color:${STATUS_COLORS[shipment.status]}"><i></i></span>`,
-    iconSize: [30, 38],
-    iconAnchor: [15, 36],
-    popupAnchor: [0, -32],
+interface ShipmentMarkerProps extends Pick<ShipmentMapProps, 'onSelect'> {
+  shipment: Shipment
+  selected: boolean
+  outsideResults: boolean
+  selectedMarker: RefObject<L.Marker | null>
+}
+
+function ShipmentMarker({ shipment, selected, outsideResults, selectedMarker, onSelect }: ShipmentMarkerProps) {
+  const [{ container, icon }] = useState(() => {
+    const container = document.createElement('div')
+    return {
+      container,
+      icon: L.divIcon({
+        className: 'shipment-marker-shell',
+        html: container,
+        iconSize: [36, 36],
+        iconAnchor: [18, 18],
+        popupAnchor: [0, -20],
+      }),
+    }
   })
+  return (
+    <Marker
+      title={shipment.shipment_number}
+      ref={selected ? selectedMarker : undefined}
+      position={[shipment.current_position.latitude, shipment.current_position.longitude]}
+      icon={icon}
+      zIndexOffset={selected ? 1000 : 0}
+      eventHandlers={{ click: () => onSelect(shipment) }}
+    >
+      {createPortal(
+        <span className="shipment-marker-ship" style={{ color: STATUS_COLORS[shipment.status] }}>
+          <Ship size={32} strokeWidth={2.5} aria-hidden="true" />
+        </span>,
+        container,
+      )}
+      <Popup autoPan={false}>
+        <div className="map-popup">
+          <strong>{shipment.shipment_number}</strong>
+          <span>{shipment.title}</span>
+          <small>{shipment.current_location_name}</small>
+          {outsideResults && selected ? <small>현재 검색 결과 외 배송</small> : null}
+          <b style={{ color: STATUS_COLORS[shipment.status] }}>{STATUS_LABELS[shipment.status]}</b>
+        </div>
+      </Popup>
+    </Marker>
+  )
 }
 
-function MapViewport({ shipments, selected, locateRequest, selectedMarker }: Omit<ShipmentMapProps, 'onSelect'> & { selectedMarker: RefObject<L.Marker | null> }) {
+function MapViewport({ shipments, selected, locateRequest, selectedMarker }: Pick<ShipmentMapProps, 'shipments' | 'selected' | 'locateRequest'> & { selectedMarker: RefObject<L.Marker | null> }) {
   const map = useMap()
   const previousView = useRef('')
   const previousLocate = useRef<number | null>(null)
@@ -42,6 +90,16 @@ function MapViewport({ shipments, selected, locateRequest, selectedMarker }: Omi
   const focusLatitude = locateRequest !== null && selected ? selected.current_position.latitude : null
   const focusLongitude = locateRequest !== null && selected ? selected.current_position.longitude : null
   const hasSelection = selected !== null
+  const selectedId = selected?.id ?? null
+
+  useEffect(() => {
+    const popup = selectedMarker.current?.getPopup()
+    map.eachLayer(layer => {
+      if (layer instanceof L.Popup && (layer !== popup || locateRequest !== null)) {
+        map.closePopup(layer)
+      }
+    })
+  }, [map, selectedId, locateRequest, selectedMarker])
 
   useEffect(() => {
     const points: [number, number][] = JSON.parse(positions)
@@ -91,26 +149,42 @@ function MapViewport({ shipments, selected, locateRequest, selectedMarker }: Omi
   return null
 }
 
+function MapSearchArea({ searchCenter, searchRadiusKm, pickingCenter, onPickCenter }: Pick<ShipmentMapProps, 'searchCenter' | 'searchRadiusKm' | 'pickingCenter' | 'onPickCenter'>) {
+  const map = useMapEvents({
+    click(event) {
+      if (!pickingCenter) return
+      const coordinate = event.latlng.wrap()
+      onPickCenter({ latitude: coordinate.lat, longitude: coordinate.lng })
+    },
+  })
+  useEffect(() => {
+    const container = map.getContainer()
+    container.classList.toggle('picking-radius', pickingCenter)
+    return () => container.classList.remove('picking-radius')
+  }, [map, pickingCenter])
+  return searchCenter ? <>
+    <Circle center={[searchCenter.latitude, searchCenter.longitude]} radius={searchRadiusKm * 1000}
+      interactive={false} pathOptions={{ color: 'var(--success)', weight: 2, fillOpacity: 0.08, dashArray: '5 5' }} />
+    <CircleMarker center={[searchCenter.latitude, searchCenter.longitude]} radius={4}
+      interactive={false} pathOptions={{ color: 'var(--success)', fillOpacity: 1 }} />
+  </> : null
+}
+
 export function ShipmentMap({
   shipments,
   selected,
   locateRequest,
   onSelect,
+  searchCenter,
+  searchRadiusKm,
+  pickingCenter,
+  onPickCenter,
 }: ShipmentMapProps) {
   const selectedMarker = useRef<L.Marker | null>(null)
   const outsideResults = selected && !shipments.some((shipment) => shipment.id === selected.id)
   const mapShipments = outsideResults ? [...shipments, selected] : shipments
 
-  const selectedRoute: [number, number][] | null = selected
-    ? [
-        [selected.origin.latitude, selected.origin.longitude],
-        [
-          selected.current_position.latitude,
-          selected.current_position.longitude,
-        ],
-        [selected.destination.latitude, selected.destination.longitude],
-      ]
-    : null
+  const selectedRoute = selected ? shipmentRoute(selected) : null
 
   return (
     <MapContainer
@@ -128,10 +202,12 @@ export function ShipmentMap({
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
       />
       <MapViewport shipments={shipments} selected={selected} locateRequest={locateRequest} selectedMarker={selectedMarker} />
+      <MapSearchArea searchCenter={searchCenter} searchRadiusKm={searchRadiusKm} pickingCenter={pickingCenter} onPickCenter={onPickCenter} />
 
       {selected && selectedRoute ? (
         <>
           <Polyline
+            interactive={false}
             positions={selectedRoute}
             pathOptions={{
               color: STATUS_COLORS[selected.status],
@@ -142,6 +218,7 @@ export function ShipmentMap({
           />
           <CircleMarker
             center={[selected.origin.latitude, selected.origin.longitude]}
+            interactive={false}
             radius={5}
             pathOptions={{
               color: '#243348',
@@ -150,6 +227,7 @@ export function ShipmentMap({
             }}
           />
           <CircleMarker
+            interactive={false}
             center={[
               selected.destination.latitude,
               selected.destination.longitude,
@@ -165,32 +243,14 @@ export function ShipmentMap({
       ) : null}
 
       {mapShipments.map((shipment) => (
-        <Marker
+        <ShipmentMarker
           key={shipment.id}
-          title={shipment.shipment_number}
-          ref={selected?.id === shipment.id ? selectedMarker : undefined}
-          position={[
-            shipment.current_position.latitude,
-            shipment.current_position.longitude,
-          ]}
-          icon={markerIcon(shipment)}
-          zIndexOffset={
-            selected?.shipment_number === shipment.shipment_number ? 1000 : 0
-          }
-          eventHandlers={{ click: () => onSelect(shipment) }}
-        >
-          <Popup autoPan={false}>
-            <div className="map-popup">
-              <strong>{shipment.shipment_number}</strong>
-              <span>{shipment.title}</span>
-              <small>{shipment.current_location_name}</small>
-              {outsideResults && selected?.id === shipment.id ? <small>현재 검색 결과 외 배송</small> : null}
-              <b style={{ color: STATUS_COLORS[shipment.status] }}>
-                {STATUS_LABELS[shipment.status]}
-              </b>
-            </div>
-          </Popup>
-        </Marker>
+          shipment={shipment}
+          selected={selected?.id === shipment.id}
+          selectedMarker={selectedMarker}
+          outsideResults={Boolean(outsideResults)}
+          onSelect={onSelect}
+        />
       ))}
     </MapContainer>
   )

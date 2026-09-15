@@ -8,6 +8,8 @@ from time import monotonic
 from typing import Any
 from uuid import uuid4
 
+from fastapi.encoders import jsonable_encoder
+
 from app.models import ChatResponse
 
 _sink: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar("progress_sink", default=None)
@@ -60,7 +62,7 @@ async def stream_chat(
             except TimeoutError:
                 yield json.dumps({"type": "heartbeat"}) + "\n"
                 continue
-            yield json.dumps(event, ensure_ascii=False) + "\n"
+            yield json.dumps(jsonable_encoder(event), ensure_ascii=False) + "\n"
             if event["type"] in ("result", "error"):
                 break
     finally:

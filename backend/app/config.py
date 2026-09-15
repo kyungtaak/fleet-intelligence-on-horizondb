@@ -1,7 +1,9 @@
 from functools import lru_cache
+from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from psycopg.conninfo import make_conninfo
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,11 +31,26 @@ class Settings(BaseSettings):
     azure_embed_deployment: str = "text-embedding-3-small"
     azure_api_version: str = "2025-03-01-preview"
     embedding_model_alias: str = "horizonship-embedding"
+    chat_provider: Literal["azure_openai", "horizondb"] = "azure_openai"
+    embedding_provider: Literal["azure_openai", "horizondb"] = "azure_openai"
+    chat_model_alias: str = Field(default="horizonship-chat", min_length=1)
+    model_timeout_seconds: int = Field(default=45, ge=1, le=100)
+    search_timezone: str = "Asia/Seoul"
+    capture_query_plan: bool = False
     embedding_batch_size: int = Field(default=20, ge=1, le=100)
     cors_origins: list[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ]
+
+    @field_validator("search_timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("SEARCH_TIMEZONE must be an IANA timezone") from exc
+        return value
 
     @property
     def database_conninfo(self) -> str | None:

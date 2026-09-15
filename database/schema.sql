@@ -128,6 +128,10 @@ CREATE INDEX IF NOT EXISTS shipments_current_position_gix
 CREATE INDEX IF NOT EXISTS shipments_status_idx
 	ON horizon_ship.shipments (status);
 
+CREATE INDEX IF NOT EXISTS shipments_eta_idx ON horizon_ship.shipments (eta);
+CREATE INDEX IF NOT EXISTS shipments_current_geography_idx
+	ON horizon_ship.shipments USING gist ((current_position::geography));
+
 COMMENT ON TABLE horizon_ship.shipments IS
 	'Shipping data combining relational fields and PostGIS locations.';
 COMMENT ON TABLE horizon_ship.shipment_embedding_jobs IS

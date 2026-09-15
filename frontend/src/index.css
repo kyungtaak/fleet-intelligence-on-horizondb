@@ -1,4 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@600;700&display=swap');
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.css');
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&display=swap');
 
 :root {
   --surface-canvas: #e9eef2;
@@ -16,8 +17,8 @@
   --warning: #e6760a;
   --warning-dark: #a95008;
   --danger: #ce3150;
-  --font-body: 'Manrope', 'Segoe UI', sans-serif;
-  --font-display: 'Space Grotesk', 'Segoe UI', sans-serif;
+  --font-body: 'Pretendard Variable', Pretendard, 'Malgun Gothic', sans-serif;
+  --font-display: var(--font-body);
   --font-mono: 'IBM Plex Mono', Consolas, monospace;
   --shadow-sm: 0 1px 2px rgba(25, 38, 52, 0.08);
   --shadow-md: 0 5px 16px rgba(25, 38, 52, 0.14);
@@ -27,8 +28,6 @@
   font-family: var(--font-body);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
 }
 
 * { box-sizing: border-box; }
@@ -46,7 +45,11 @@ body { overflow: hidden; }
 
 button,
 input,
-select { letter-spacing: 0; }
+select,
+textarea {
+  font-family: inherit;
+  letter-spacing: 0;
+}
 
 button:focus-visible,
 input:focus-visible,

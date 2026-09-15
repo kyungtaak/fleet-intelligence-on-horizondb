@@ -11,6 +11,8 @@ from app.agent import AgentClient, ShipmentAgent
 from app.config import Settings, get_settings
 from app.models import (
     ChatResponse,
+    CriteriaSearchRequest,
+    CriteriaSearchResponse,
     DatabaseCapabilities,
     DemoShipmentDelete,
     SearchRequest,
@@ -96,7 +98,17 @@ def create_app(
         return capabilities.model_copy(
             update={
                 "agent_framework": True,
-                "chat_model": resolved_settings.azure_openai_deployment,
+                "chat_model": (
+                    getattr(shipment_repository, "chat_model_name", resolved_settings.chat_model_alias)
+                    if resolved_settings.chat_provider == "horizondb"
+                    else resolved_settings.azure_openai_deployment
+                ),
+                "chat_provider": resolved_settings.chat_provider,
+                "embedding_provider": resolved_settings.embedding_provider,
+                "chat_model_alias": (
+                    resolved_settings.chat_model_alias
+                    if resolved_settings.chat_provider == "horizondb" else None
+                ),
             }
         )
 
@@ -210,6 +222,14 @@ def create_app(
                 detail="Shipment not found",
             )
         return shipment
+
+    @app.post("/api/search/criteria", response_model=CriteriaSearchResponse)
+    async def criteria_search(
+        request: CriteriaSearchRequest,
+        shipment_repository: RepositoryDependency,
+    ) -> CriteriaSearchResponse:
+        result = await shipment_repository.search_shipments(request.to_filters(), request.limit)
+        return CriteriaSearchResponse(query=request.query, **result.model_dump())
 
     @app.post("/api/search", response_model=SearchResponse)
     async def semantic_search(

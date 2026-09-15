@@ -18,6 +18,17 @@ from app.config import Settings
 
 EMBEDDING_DIMENSIONS = 1536
 TOKEN_SCOPE = "https://cognitiveservices.azure.com/.default"
+DATABASE_EMBEDDING_SQL = "SELECT azure_openai.create_embeddings(%s, %s)::public.vector(1536)::text AS embedding;"
+
+
+def validate_vector_text(value: str) -> str:
+    vector = json.loads(value)
+    if not isinstance(vector, list) or len(vector) != EMBEDDING_DIMENSIONS or not all(
+        isinstance(number, (int, float)) and not isinstance(number, bool) and math.isfinite(number)
+        for number in vector
+    ):
+        raise ValueError("Expected a finite 1536-dimensional embedding")
+    return json.dumps(vector, allow_nan=False)
 
 
 def openai_base_url(endpoint: str) -> str:

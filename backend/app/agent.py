@@ -1,5 +1,7 @@
 import json
+from datetime import datetime
 from typing import Annotated, Any, Protocol
+from zoneinfo import ZoneInfo
 
 from agent_framework import tool
 from agent_framework.openai import OpenAIChatClient
@@ -8,6 +10,7 @@ from pydantic import Field
 
 from app.config import Settings
 from app.embeddings import openai_base_url
+from app.horizon_agent_client import HorizonDBChatClient
 from app.models import ChatResponse, SearchRequest, ShipmentFilters, ShipmentSearchResult
 from app.progress import report_progress
 from app.region_boundaries import REGION_NAMES
@@ -42,6 +45,8 @@ def _shipment_tool_payload(result: ShipmentSearchResult) -> str:
                     "eta": shipment.eta.isoformat() if shipment.eta else None,
                     "cosine_similarity": shipment.similarity,
                     "remaining_distance_km": shipment.remaining_distance_km,
+                    "distance_to_center_km": shipment.distance_to_center_km,
+                    "hybrid_score": shipment.hybrid_score,
                 }
                 for shipment in result.shipments
             ],
@@ -60,6 +65,8 @@ class ShipmentAgent:
         self._repository = repository
         if client is not None:
             self._client = client
+        elif settings.chat_provider == "horizondb":
+            self._client = HorizonDBChatClient(repository, settings.chat_model_alias)
         elif settings.azure_openai_key:
             self._client = OpenAIChatClient(
                 model=settings.azure_openai_deployment,
@@ -80,6 +87,7 @@ class ShipmentAgent:
     async def run(self, request: SearchRequest) -> ChatResponse:
         search_result: ShipmentSearchResult | None = None
         tool_called = False
+        reference_date = datetime.now(ZoneInfo(self._settings.search_timezone)).date()
 
         @tool(
             description=(
@@ -97,7 +105,9 @@ class ShipmentAgent:
                         "Exact status, shipment_number, origin/destination region or place. "
                         "For distance use a catalog nearby_location, radius_km and "
                         "position_field (current by default). cargo_query contains ONLY "
-                        "cargo meaning, never status, geography, IDs, or output instructions."
+                        "cargo meaning, never status, geography, dates, IDs, or output instructions. "
+                        "eta_start/eta_end are inclusive dates; semantic_spatial ranking requires "
+                        "cargo_query, nearby_location and radius_km."
                     )
                 ),
             ],
@@ -107,6 +117,8 @@ class ShipmentAgent:
                 raise ValueError("Only one shipment search is allowed per request")
             tool_called = True
             filters = ShipmentFilters.model_validate(filters)
+            if filters.nearby_point is not None:
+                raise ValueError("Map coordinates are only accepted by the manual criteria search")
             if request.status is not None:
                 filters = filters.model_copy(update={"status": request.status})
             report_progress(
@@ -172,7 +184,21 @@ class ShipmentAgent:
                 "classification, not a physical continent split. Middle East is a separately "
                 "documented country group including Egypt and Turkey. Points outside land "
                 "polygons are excluded, including offshore ports; no coastline buffer is applied. "
-                "Country-wide filters, dates, exclusions and other "
+                "ETA filtering is supported: set eta_start/eta_end to inclusive ISO dates. "
+                "A single date uses the same start and end. For a center date plus/minus N days, "
+                "resolve the two boundary dates. A missing ETA never matches a date range. "
+                f"The current reference date is {reference_date.isoformat()} in {self._settings.search_timezone}. "
+                "Resolve today/tomorrow using this reference date, this week as Monday..Sunday, "
+                "and next week as the following Monday..Sunday. Ask if a date or period is ambiguous. "
+                "Dates constrain the stored ETA, not historical delivery events. "
+                "Use sort_by='semantic_spatial' ONLY when the user explicitly requests both cargo "
+                "relevance and proximity ranking to a named catalog place with a radius. "
+                "Ask for a missing center or radius instead of guessing. A radius constraint alone "
+                "does not enable weighted ranking: keep semantic order unless explicitly requested. "
+                "This score is 0.72*cosine_similarity + 0.28*max(0,1-distance_to_center_km/radius_km), "
+                "not a probability. Keep the returned score order; show the weights and center distance. "
+                "The center distance uses position_field and is NOT remaining_distance_km. "
+                "Country-wide filters, exclusions and other "
                 "unsupported conditions must NOT be silently omitted or approximated by "
                 "cargo_query. Ask for clarification in Korean without calling the tool. "
                 "For an unlisted place or ambiguous distance center ask for clarification. "
@@ -187,7 +213,11 @@ class ShipmentAgent:
         prompt = request.query
         if request.status is not None:
             prompt = f"{prompt}\nApply the required status filter: {request.status.value}."
-        report_progress("agent", "AI가 질문을 해석하고 검색 조건을 정하고 있습니다.")
+        report_progress(
+            "agent", "AI가 질문을 해석하고 검색 조건을 정하고 있습니다.",
+            provider=self._settings.chat_provider, reference_date=reference_date.isoformat(),
+            timezone=self._settings.search_timezone,
+        )
         result = await agent.run(prompt)
 
         if tool_called and search_result is None:
@@ -199,7 +229,13 @@ class ShipmentAgent:
             shipments=search_result.shipments if search_result else [],
             answer=result.text,
             agent_framework=True,
-            chat_model=self._settings.azure_openai_deployment,
+            chat_model=(
+                getattr(self._repository, "chat_model_name", self._settings.chat_model_alias)
+                if self._settings.chat_provider == "horizondb"
+                else self._settings.azure_openai_deployment
+            ),
+            chat_provider=self._settings.chat_provider,
+            embedding_provider=self._settings.embedding_provider,
             has_more=search_result.has_more if search_result else False,
             applied_filters=search_result.applied_filters if search_result else None,
         )

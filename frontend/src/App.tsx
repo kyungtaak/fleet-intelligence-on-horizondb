@@ -1,7 +1,7 @@
 import {
   startTransition,
-  useDeferredValue,
   useEffect,
+  useRef,
   useState,
 } from 'react'
 import {
@@ -17,6 +17,7 @@ import {
   getShipments,
   getShipmentStats,
   searchShipments,
+  searchCriteria,
 } from './api'
 import { ChatPanel } from './components/ChatPanel'
 import { DemoDataPanel } from './components/DemoDataPanel'
@@ -25,6 +26,9 @@ import { ShipmentList } from './components/ShipmentList'
 import { ShipmentMap } from './components/ShipmentMap'
 import type {
   DatabaseCapabilities,
+  CriteriaSearchRequest,
+  CriteriaSearchResponse,
+  Coordinate,
   SearchResponse,
   SearchProgress,
   Shipment,
@@ -33,8 +37,12 @@ import type {
 } from './types'
 import './App.css'
 
-type StatusFilter = ShipmentStatus | 'all'
 type MobileView = 'shipments' | 'map' | 'assistant'
+
+const DEFAULT_CRITERIA: CriteriaSearchRequest = {
+  query: '', status: null, eta_date: null, eta_days: 3, search_center: null,
+  radius_km: 500, ranking: 'semantic', limit: 24,
+}
 
 function App() {
   const [shipments, setShipments] = useState<Shipment[]>([])
@@ -45,8 +53,15 @@ function App() {
   const [selected, setSelected] = useState<Shipment | null>(null)
   const [locateRequest, setLocateRequest] = useState(0)
   const [locating, setLocating] = useState(false)
-  const [search, setSearch] = useState('')
-  const [status, setStatus] = useState<StatusFilter>('all')
+  const [criteria, setCriteria] = useState(DEFAULT_CRITERIA)
+  const [criteriaResult, setCriteriaResult] = useState<CriteriaSearchResponse | null>(null)
+  const [appliedCriteria, setAppliedCriteria] = useState<CriteriaSearchRequest | null>(null)
+  const [resultSource, setResultSource] = useState<'criteria' | 'agent' | null>(null)
+  const [criteriaSearching, setCriteriaSearching] = useState(false)
+  const [criteriaError, setCriteriaError] = useState<string | null>(null)
+  const [pickingCenter, setPickingCenter] = useState(false)
+  const criteriaAbort = useRef<AbortController | null>(null)
+  const searchGeneration = useRef(0)
   const [mobileView, setMobileView] = useState<MobileView>('map')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -56,9 +71,63 @@ function App() {
     id: number
     query: string
   } | null>(null)
-  const deferredSearch = useDeferredValue(search.trim().toLowerCase())
+  useEffect(() => () => criteriaAbort.current?.abort(), [])
+
+  function cancelCriteria() {
+    criteriaAbort.current?.abort()
+    criteriaAbort.current = null
+    searchGeneration.current += 1
+    setCriteriaSearching(false)
+  }
+
+  function resetCriteria() {
+    cancelCriteria()
+    setCriteria(DEFAULT_CRITERIA)
+    setCriteriaResult(null)
+    setAppliedCriteria(null)
+    setResultSource(null)
+    setCriteriaError(null)
+    setPickingCenter(false)
+  }
+
+  async function runCriteriaSearch() {
+    cancelCriteria()
+    const controller = new AbortController()
+    criteriaAbort.current = controller
+    const generation = searchGeneration.current
+    const request = { ...criteria, query: criteria.query.trim() }
+    setCriteriaSearching(true)
+    setCriteriaError(null)
+    setPickingCenter(false)
+    try {
+      const result = await searchCriteria(request, controller.signal)
+      if (controller.signal.aborted || generation !== searchGeneration.current) return
+      startTransition(() => {
+        setSemanticResults(result.shipments)
+        setCriteriaResult(result)
+        setAppliedCriteria(request)
+        setCriteria(request)
+        setResultSource('criteria')
+        clearSelection()
+      })
+    } catch (searchError) {
+      if (!controller.signal.aborted) setCriteriaError(searchError instanceof Error ? searchError.message : '검색하지 못했습니다.')
+    } finally {
+      if (criteriaAbort.current === controller) {
+        criteriaAbort.current = null
+        setCriteriaSearching(false)
+      }
+    }
+  }
+
+  function pickSearchCenter(point: Coordinate) {
+    setCriteria(current => ({ ...current, search_center: point }))
+    setPickingCenter(false)
+    setMobileView('shipments')
+  }
 
   async function loadWorkspace() {
+    showAllShipments()
     setLoading(true)
     setError(null)
     try {
@@ -111,21 +180,7 @@ function App() {
     }
   }, [])
 
-  const sourceShipments = semanticResults ?? shipments
-  const visibleShipments = sourceShipments.filter((shipment) => {
-    const matchesStatus = status === 'all' || shipment.status === status
-    const haystack = [
-      shipment.shipment_number,
-      shipment.title,
-      shipment.description,
-      shipment.origin_name,
-      shipment.destination_name,
-      shipment.current_location_name,
-    ]
-      .join(' ')
-      .toLowerCase()
-    return matchesStatus && (!deferredSearch || haystack.includes(deferredSearch))
-  })
+  const visibleShipments = semanticResults ?? shipments
 
   const selectionOutsideResults = selected !== null && !visibleShipments.some(
     (shipment) => shipment.shipment_number === selected.shipment_number,
@@ -150,16 +205,16 @@ function App() {
   }
 
   function showAllShipments() {
+    resetCriteria()
     startTransition(() => {
       setSemanticResults(null)
-      setSearch('')
-      setStatus('all')
       setSelected(null)
       setLocating(false)
     })
   }
 
   function applyDemoShipments(changed: Shipment[], focus: Shipment | null) {
+    resetCriteria()
     startTransition(() => {
       setShipments((current) => {
         const merged = new Map(
@@ -173,8 +228,6 @@ function App() {
         )
       })
       setSemanticResults(null)
-      setSearch('')
-      setStatus('all')
       setSelected(focus)
       setLocating(Boolean(focus))
       if (focus) setLocateRequest((current) => current + 1)
@@ -199,6 +252,7 @@ function App() {
   }
 
   function removeDemoShipments(shipmentIds: string[]) {
+    resetCriteria()
     const deleted = new Set(shipmentIds)
     const removed = shipments.filter((shipment) => deleted.has(shipment.id))
     setShipments((current) => current.filter((shipment) => !deleted.has(shipment.id)))
@@ -210,8 +264,6 @@ function App() {
       })),
     } : null)
     setSemanticResults(null)
-    setSearch('')
-    setStatus('all')
     setSelected(null)
     setLocating(false)
     setQueryRequest(null)
@@ -221,17 +273,24 @@ function App() {
   async function runSemanticSearch(
     query: string, onProgress: (event: SearchProgress) => void, signal: AbortSignal,
   ): Promise<SearchResponse> {
+    cancelCriteria()
+    const generation = searchGeneration.current
+    setPickingCenter(false)
     const result = await searchShipments(
       query,
-      status === 'all' ? null : status,
+      criteria.status,
       onProgress,
       signal,
     )
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
+    if (generation !== searchGeneration.current) throw new DOMException('다른 검색으로 대체됐습니다.', 'AbortError')
     if (result.search_mode === 'not_searched') return result
     startTransition(() => {
       setSemanticResults(result.shipments)
-      setSearch('')
+      setCriteria(current => ({ ...DEFAULT_CRITERIA, status: current.status }))
+      setCriteriaResult(null)
+      setAppliedCriteria(null)
+      setResultSource('agent')
       setSelected(null)
       setLocating(false)
     })
@@ -249,8 +308,8 @@ function App() {
             <Boxes size={20} />
           </span>
           <div>
-            <strong>HorizonShip</strong>
-            <span>Global operations</span>
+            <strong>Fleet Intelligence</strong>
+            <span>Powered by HorizonDB</span>
           </div>
         </div>
 
@@ -265,7 +324,7 @@ function App() {
           </span>
           <span className={capabilities?.diskann_version ? 'available' : 'standby'}>
             <PackageSearch size={14} />
-            DiskANN
+            {capabilities?.diskann_spherical_quantization && capabilities.diskann_sq_bits === 4 ? 'SQ4 DiskANN' : 'DiskANN'}
           </span>
           <span className={capabilities?.agent_framework ? 'available' : 'standby'}>
             <Bot size={14} />
@@ -296,17 +355,24 @@ function App() {
           shipments={visibleShipments}
           total={visibleShipments.length}
           selectedNumber={selected?.shipment_number ?? null}
-          search={search}
-          status={status}
-          loading={loading}
-          onSearchChange={setSearch}
-          onStatusChange={setStatus}
+          criteria={criteria}
+          result={criteriaResult}
+          source={resultSource}
+          dirty={JSON.stringify(criteria) !== JSON.stringify(appliedCriteria ?? DEFAULT_CRITERIA)}
+          searching={criteriaSearching}
+          searchError={criteriaError}
+          pickingCenter={pickingCenter}
+          loading={loading || criteriaSearching}
+          onChange={patch => setCriteria(current => ({ ...current, ...patch }))}
+          onSearch={() => void runCriteriaSearch()}
+          onCancel={cancelCriteria}
+          onPickCenter={() => {
+            setPickingCenter(current => !current)
+            setMobileView('map')
+          }}
           onSelect={(shipment) => selectShipment(shipment, true)}
           onRefresh={() => void loadWorkspace()}
-          onReset={() => {
-            setSearch('')
-            setStatus('all')
-          }}
+          onReset={showAllShipments}
           onOpenDemo={() => {
             setDemoOpen(true)
             setMobileView('map')
@@ -332,12 +398,17 @@ function App() {
                 Show all {shipments.length}
               </button>
             ) : null}
+            {pickingCenter ? <button type="button" onClick={() => setPickingCenter(false)}>Cancel radius selection</button> : null}
           </div>
           <ShipmentMap
             shipments={visibleShipments}
             selected={selected}
             locateRequest={locating ? locateRequest : null}
             onSelect={(shipment) => selectShipment(shipment)}
+            searchCenter={criteria.search_center}
+            searchRadiusKm={criteria.radius_km}
+            pickingCenter={pickingCenter}
+            onPickCenter={pickSearchCenter}
           />
           {selected ? (
             <ShipmentDetail
@@ -360,6 +431,7 @@ function App() {
         <ChatPanel
           key={chatRevision}
           onSearch={runSemanticSearch}
+          externalBusy={criteriaSearching}
           selectedNumber={selected?.shipment_number ?? null}
           onSelect={(shipment) => selectShipment(shipment, true)}
           onLocate={locateShipment}

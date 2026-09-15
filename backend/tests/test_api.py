@@ -113,6 +113,25 @@ async def test_parallel_streams_do_not_mix_events():
     assert first[0]["request_id"] != second[0]["request_id"]
 
 
+async def test_stream_serializes_eta_bindings_and_completes():
+    from datetime import date
+
+    from app.models import ChatResponse
+
+    async def run():
+        report_progress(
+            "db_query", "ETA query", parameters=[None, date(2026, 9, 1), date(2026, 9, 30), 9],
+        )
+        return ChatResponse(
+            query="ETA search", search_mode="sql", shipments=[], answer="조회 완료", chat_model="chat",
+        )
+
+    events = [json.loads(line) async for line in stream_chat(run)]
+    query = next(event for event in events if event.get("stage") == "db_query")
+    assert query["parameters"] == [None, "2026-09-01", "2026-09-30", 9]
+    assert events[-1]["type"] == "result"
+
+
 def test_semantic_search_and_detail_endpoints(
     live_settings,
     fake_repository,
@@ -139,6 +158,78 @@ def test_semantic_search_and_detail_endpoints(
     assert chat.json()["answer"].startswith("SHIP-0014")
     assert detail.status_code == 200
     assert detail.json()["title"] == "Hospital Equipment"
+
+
+def test_manual_criteria_search_binds_map_and_eta_without_agent(
+    live_settings, fake_repository, fake_agent_client,
+):
+    with make_client(live_settings, fake_repository, fake_agent_client) as client:
+        response = client.post("/api/search/criteria", json={
+            "query": "medical supplies", "eta_date": "2026-09-15", "eta_days": 3,
+            "search_center": {"latitude": 35.1796, "longitude": 129.0756},
+            "radius_km": 500, "status": "delayed", "ranking": "semantic_spatial",
+        })
+    assert response.status_code == 200
+    filters = response.json()["applied_filters"]
+    assert filters["eta_start"] == "2026-09-12"
+    assert filters["eta_end"] == "2026-09-18"
+    assert filters["nearby_point"] == {"latitude": 35.1796, "longitude": 129.0756}
+    assert filters["sort_by"] == "semantic_spatial"
+    assert "answer" not in response.json()
+    assert fake_agent_client.agent_options is None
+
+
+@pytest.mark.parametrize("payload", [
+    {},
+    {"status": "delayed", "eta_date": "2026-09-15", "eta_days": 0},
+    {"search_center": {"latitude": 10, "longitude": 20}, "radius_km": 50},
+])
+def test_manual_exact_criteria_allow_no_query(
+    live_settings, fake_repository, fake_agent_client, payload,
+):
+    with make_client(live_settings, fake_repository, fake_agent_client) as client:
+        response = client.post("/api/search/criteria", json=payload)
+    assert response.status_code == 200
+    assert response.json()["applied_filters"]["cargo_query"] is None
+    if payload.get("eta_date"):
+        assert response.json()["applied_filters"]["eta_start"] == "2026-09-15"
+        assert response.json()["applied_filters"]["eta_end"] == "2026-09-15"
+    assert fake_agent_client.agent_options is None
+
+
+@pytest.mark.parametrize("payload", [
+    {"query": "x"}, {"eta_days": -1}, {"eta_days": 366},
+    {"eta_date": "0001-01-01", "eta_days": 3}, {"eta_date": "not-a-date"},
+    {"search_center": {"latitude": 95, "longitude": 129}},
+    {"search_center": {"latitude": 35, "longitude": 190}},
+    {"radius_km": 0}, {"ranking": "semantic_spatial", "query": "cargo"},
+])
+def test_manual_criteria_invalid_inputs_return_422(
+    live_settings, fake_repository, fake_agent_client, payload,
+):
+    with make_client(live_settings, fake_repository, fake_agent_client) as client:
+        assert client.post("/api/search/criteria", json=payload).status_code == 422
+
+
+async def test_manual_point_uses_parameterized_gis_without_embeddings(live_settings):
+    with (
+        patch("app.repository.AsyncConnectionPool") as pool_factory,
+        patch("app.repository.async_embedding_client") as sdk,
+    ):
+        connection = MagicMock()
+        cursor = AsyncMock()
+        cursor.fetchall.return_value = []
+        connection.execute = AsyncMock(return_value=cursor)
+        pool_factory.return_value.connection.return_value.__aenter__.return_value = connection
+        result = await PostgresShipmentRepository(live_settings).search_shipments(
+            ShipmentFilters(nearby_point={"latitude": 10, "longitude": 20}, radius_km=50), 24,
+        )
+        statement, parameters = connection.execute.await_args.args
+        assert "ST_DWithin(s.current_position::public.geography" in statement
+        assert parameters[-4:] == [20.0, 10.0, 50000.0, 25]
+        assert result.search_mode == "gis"
+        sdk.assert_not_called()
+    assert "nearby_point" not in ShipmentFilters.model_json_schema()["properties"]
 
 
 def test_unknown_shipment_and_invalid_search_are_rejected(
@@ -247,7 +338,7 @@ async def test_repository_writes_use_postgis_and_fixed_patch_fields(
 ) -> None:
     sample = fake_repository._shipments[0]
     create_request = ShipmentCreate.model_validate(sample.model_dump(exclude={
-        "id", "updated_at", "similarity", "remaining_distance_km",
+        "id", "updated_at", "similarity", "remaining_distance_km", "distance_to_center_km", "hybrid_score",
     }))
     with patch("app.repository.AsyncConnectionPool") as pool_factory:
         connection = MagicMock()
@@ -339,6 +430,146 @@ async def test_demo_delete_repository_checks_markers_and_pending(live_settings, 
         assert '"tags": ["pipeline-demo"]' in select_sql
         assert "FOR UPDATE" in select_sql
         assert connection.transaction.call_count == 1
+
+
+async def test_database_model_calls_execute_once_and_release_connection(live_settings):
+    settings = live_settings.model_copy(update={
+        "chat_provider": "horizondb", "embedding_provider": "horizondb",
+    })
+    with (
+        patch("app.repository.AsyncConnectionPool") as pool_factory,
+        patch("app.repository.async_embedding_client") as sdk,
+    ):
+        connection = MagicMock()
+        cursor = AsyncMock()
+        cursor.fetchone.side_effect = [{"answer": "model answer"}, {"embedding": json.dumps([0.1] * 1536)}]
+        cursor.fetchall.return_value = []
+        connection.execute = AsyncMock(return_value=cursor)
+        context = pool_factory.return_value.connection.return_value
+        context.__aenter__.return_value = connection
+        repository = PostgresShipmentRepository(settings)
+        assert await repository.generate_text("question", "instructions") == "model answer"
+        context.__aexit__.assert_awaited_once()
+        await repository.semantic_search("medical cargo", None, 8)
+        statements = [call.args[0] for call in connection.execute.await_args_list]
+        assert sum("azure_ai.generate" in statement for statement in statements) == 1
+        assert sum("create_embeddings" in statement for statement in statements) == 1
+        assert not any("EXPLAIN" in statement for statement in statements)
+        sdk.assert_not_called()
+
+
+@pytest.mark.parametrize("start,end", [("2026-09-15", "2026-09-15"), (None, "2026-09-17"), ("2026-09-15", None)])
+async def test_eta_filters_are_inclusive_bound_sql_without_embeddings(live_settings, start, end):
+    with (
+        patch("app.repository.AsyncConnectionPool") as pool_factory,
+        patch("app.repository.async_embedding_client") as sdk,
+    ):
+        connection = MagicMock()
+        cursor = AsyncMock()
+        cursor.fetchall.return_value = []
+        connection.execute = AsyncMock(return_value=cursor)
+        pool_factory.return_value.connection.return_value.__aenter__.return_value = connection
+        result = await PostgresShipmentRepository(live_settings).search_shipments(
+            ShipmentFilters(eta_start=start, eta_end=end), 8,
+        )
+        statement, parameters = connection.execute.await_args.args
+        assert ("s.eta >= %s::date" in statement) is bool(start)
+        assert ("s.eta <= %s::date" in statement) is bool(end)
+        assert parameters[-1] == 9
+        assert result.search_mode == "sql"
+        sdk.assert_not_called()
+
+
+@pytest.mark.parametrize("filters", [
+    {"eta_start": "2026-09-20", "eta_end": "2026-09-19"},
+    {"eta_start": "2026-02-30"},
+    {"sort_by": "semantic_spatial"},
+    {"sort_by": "semantic_spatial", "cargo_query": "cargo", "nearby_location": "Busan, South Korea"},
+    {"sort_by": "semantic_spatial", "cargo_query": "cargo", "radius_km": 100},
+])
+def test_invalid_dates_and_weighted_ranking_are_rejected(filters):
+    with pytest.raises(ValueError):
+        ShipmentFilters(**filters)
+
+
+async def test_weighted_ranking_scores_all_eligible_rows_and_preserves_filters(live_settings):
+    with (
+        patch("app.repository.AsyncConnectionPool") as pool_factory,
+        patch("app.repository.async_embedding_client") as sdk,
+    ):
+        connection = MagicMock()
+        cursor = AsyncMock()
+        cursor.fetchall.return_value = []
+        connection.execute = AsyncMock(return_value=cursor)
+        pool_factory.return_value.connection.return_value.__aenter__.return_value = connection
+        sdk.return_value.__aenter__.return_value.embeddings.create = AsyncMock(
+            return_value=MagicMock(data=[MagicMock(index=0, embedding=[0.1] * 1536)]),
+        )
+        filters = ShipmentFilters(
+            cargo_query="medical supplies", sort_by="semantic_spatial", status="delayed",
+            nearby_location="Busan, South Korea", radius_km=500, position_field="origin",
+            eta_start="2026-09-01", eta_end="2026-09-30", result_limit=3,
+        )
+        result = await PostgresShipmentRepository(live_settings).search_shipments(filters, 8)
+        statement, parameters = connection.execute.await_args.args
+        assert statement.count("LIMIT") == 1
+        assert "hybrid_score DESC, s.shipment_number ASC" in statement
+        assert "0.72 *" in statement and "0.28 * GREATEST" in statement
+        assert "ST_Distance(s.origin_position::public.geography, search_center.point)" in statement
+        assert "ST_DWithin(s.origin_position::public.geography" in statement
+        assert "sej.content_version = se.content_version" in statement
+        assert parameters[3] == 500 and parameters[-1] == 4
+        assert result.search_mode == "hybrid"
+
+
+async def test_estimated_plan_reuses_vector_and_removes_expressions(live_settings):
+    settings = live_settings.model_copy(update={"capture_query_plan": True})
+    with (
+        patch("app.repository.AsyncConnectionPool") as pool_factory,
+        patch("app.repository.async_embedding_client") as sdk,
+        patch("app.repository.report_progress") as progress,
+    ):
+        connection = MagicMock()
+        cursor = AsyncMock()
+        cursor.fetchall.return_value = []
+        cursor.fetchone.return_value = {"QUERY PLAN": [{"Plan": {
+            "Node Type": "Limit", "Total Cost": 42, "Plan Rows": 8,
+            "Output": ["sensitive vector"], "Plans": [{
+                "Node Type": "Index Scan", "Index Name": "shipment_embeddings_diskann_idx",
+                "Order By": "sensitive vector", "Filter": "private literal",
+            }],
+        }}]}
+        connection.execute = AsyncMock(return_value=cursor)
+        pool_factory.return_value.connection.return_value.__aenter__.return_value = connection
+        sdk.return_value.__aenter__.return_value.embeddings.create = AsyncMock(
+            return_value=MagicMock(data=[MagicMock(index=0, embedding=[0.1] * 1536)]),
+        )
+        await PostgresShipmentRepository(settings).search_shipments(ShipmentFilters(cargo_query="cargo"), 8)
+        sdk.return_value.__aenter__.return_value.embeddings.create.assert_awaited_once()
+        assert connection.execute.await_count == 2
+        explain, select = connection.execute.await_args_list
+        assert explain.args[0].startswith("EXPLAIN (FORMAT JSON")
+        assert "ANALYZE" not in explain.args[0]
+        assert explain.args[1] == select.args[1]
+        plan_event = next(call for call in progress.call_args_list if call.args[0] == "query_plan")
+        assert plan_event.kwargs["plan_kind"] == "estimated"
+        assert plan_event.kwargs["plan"]["Plans"][0] == {
+            "Node Type": "Index Scan", "Index Name": "shipment_embeddings_diskann_idx",
+        }
+        assert "sensitive vector" not in str(progress.call_args_list)
+        assert "private literal" not in str(progress.call_args_list)
+
+
+async def test_database_provider_rejects_missing_model_functions(live_settings):
+    settings = live_settings.model_copy(update={"chat_provider": "horizondb"})
+    with patch("app.repository.AsyncConnectionPool") as pool_factory:
+        connection = MagicMock()
+        cursor = AsyncMock()
+        cursor.fetchall.return_value = []
+        connection.execute = AsyncMock(return_value=cursor)
+        pool_factory.return_value.connection.return_value.__aenter__.return_value = connection
+        with pytest.raises(RuntimeError, match="functions are unavailable"):
+            await PostgresShipmentRepository(settings)._validate_model_readiness()
 
 
 def test_startup_rejects_missing_live_configuration() -> None:

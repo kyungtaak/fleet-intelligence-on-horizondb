@@ -1,6 +1,9 @@
 # HorizonShip
 
 HorizonShip은 배송 현황 조회, 지도 표시, 자연어 검색을 함께 구현한 샘플 애플리케이션입니다.
+
+화면 이름은 **Fleet Intelligence**이며, 왼쪽 **Search Workbench**에서 조건을 직접 지정하거나
+오른쪽 **Agent with Tools**에 자연어로 질문할 수 있습니다.
 백엔드는 FastAPI로 API를 처리하고 Psycopg 3로 Azure HorizonDB에 연결합니다.
 프론트엔드는 React로 화면을 구성하며, Vite를 개발 서버와 빌드 도구로 사용합니다.
 
@@ -10,11 +13,12 @@ HorizonShip은 배송 현황 조회, 지도 표시, 자연어 검색을 함께 �
   화면은 이 좌표를 Leaflet 세계 지도에 표시하며, 반경 검색은 `ST_DWithin`으로 검사합니다.
 - Azure OpenAI의 `text-embedding-3-small`은 화물명·설명·지명·상태·metadata를 합친 텍스트를 1,536차원 벡터로 변환합니다.
   초기 데이터는 setup이 backfill하고, 이후 의미 필드 변경은 HorizonDB `azure_ai` pipeline이 처리합니다.
-  검색어 벡터는 FastAPI가 요청 시 생성합니다.
+  검색어 벡터는 요청 시 생성하며 직접 API 호출과 DB 함수 호출 중 선택합니다.
 - pgvector의 코사인 거리 연산자(`<=>`)로 자연어 검색 결과의 순서를 정합니다.
 - 벡터 후보 검색용 DiskANN 인덱스에 4-bit spherical quantization과 필터 검색 설정을 적용합니다.
   실제 인덱스 사용 여부는 실행 계획에 따라 달라지며, 샘플 24건만으로 성능 향상을 입증하지는 않습니다.
 - Microsoft Agent Framework는 `gpt-5.4` 기반 배송 어시스턴트를 실행합니다.
+  모델은 직접 API 또는 HorizonDB `azure_ai.generate`로 호출합니다.
   어시스턴트는 정확한 조건을 SQL·PostGIS로 검사하고, 화물의 의미를 찾을 때만 벡터 검색을 추가합니다.
 
 저장소에는 실제 배송 상황을 가정한 전 세계 배송 샘플 24건이 포함되어 있습니다.
@@ -24,6 +28,17 @@ HorizonShip은 배송 현황 조회, 지도 표시, 자연어 검색을 함께 �
 
 ![배송 목록, 세계 지도, 배송 어시스턴트가 표시된 HorizonShip 화면](docs/media/app.png)
 
+본문과 제목은 Pretendard를 사용하며 SQL은 고정폭 폰트를 유지합니다. 한글 폰트는 버전이 고정된 CDN에서
+불러오고, 연결할 수 없으면 설치된 한글 폰트로 표시합니다. 초기 예시에는 상태·권역·반경뿐 아니라
+ETA 기간, 의미·근접도 가중 정렬, 목적지 거리순 검색도 포함합니다.
+
+### 발표·시연 문서
+
+[문서 안내](docs/README.md)에서 현재 구현 기준의 한국어 자료를 확인할 수 있습니다.
+[18장 HTML 발표자료](docs/fleet-intelligence-slides.html), [발표자 노트](docs/presenter-notes.md),
+[기술 설명 HTML](docs/blog-post.html)과 [Markdown 원고](docs/blog-post.md)를 함께 제공합니다.
+참고 프로젝트의 출처, 고정 커밋 링크와 MIT 라이선스는 [문서 출처와 라이선스](docs/THIRD-PARTY-NOTICES.md)에 있습니다. 원본 문서·이미지의 중복 보관본은 제거하고 발표자료에 사용하는 CSS만 별도로 유지합니다.
+
 ## 아키텍처
 
 ```mermaid
@@ -31,10 +46,12 @@ flowchart LR
     Browser[React + Leaflet] -->|REST| API[FastAPI]
     API --> Agent[Agent Framework + gpt-5.4]
     Agent --> Tool[search_shipments 도구]
+    Agent -->|horizondb provider| Generate[azure_ai.generate]
+    Generate --> Foundry[Foundry 모델]
     API --> Repo[Psycopg 데이터 접근 계층]
     Tool --> Repo
     Repo --> DB[(Azure HorizonDB)]
-    Repo -->|검색어 임베딩| Embeddings[Azure OpenAI 임베딩 API]
+    Repo -->|직접 호출 또는 DB 함수| Embeddings[Azure OpenAI 임베딩 API]
     DB -->|배송 변경 trigger| Jobs[shipment_embedding_jobs]
     Jobs -->|azure_ai on_change| Embeddings
     Embeddings --> Sink[shipment_embeddings]
@@ -52,7 +69,8 @@ flowchart LR
 ### AI 배송 도우미의 질의 처리 흐름
 
 **AI는 질문을 구조화된 검색 조건으로 해석하고, 백엔드는 SQL을 조합하며, HorizonDB는 그 SQL을 실행합니다.**
-HorizonDB가 자연어를 직접 해석하거나 AI가 작성한 임의의 SQL을 실행하는 구조는 아닙니다.
+AI가 작성한 임의의 SQL을 실행하는 구조는 아닙니다. DB provider도 모델이 반환한 JSON을
+Python에서 검사한 뒤 기존 도구를 실행합니다.
 SQL·공간·벡터 검색은 별도 DB를 조회하지 않습니다. 배송 데이터와 벡터는 같은 HorizonDB 안에서
 `shipment_id` FK로 연결된 테이블에 나눠 저장합니다.
 이는 PostgreSQL·PostGIS·pgvector 기능을 HorizonDB에서 함께 사용하는 예시이며, 모두 HorizonDB만의 고유 기능은 아닙니다.
@@ -93,7 +111,8 @@ sequenceDiagram
 3. [검색 도구](backend/app/agent.py)가 입력을 검사하고 화면에서 지정한 상태를 우선 적용합니다.
    [Repository](backend/app/repository.py)는 등록된 장소·권역과 조건 조합을 검사합니다.
    열 이름과 정렬식은 코드에서 선택하고, 사용자 조건값은 Psycopg의 `%s` 바인딩으로 전달합니다.
-4. `cargo_query`가 있을 때만 백엔드가 임베딩 API를 호출합니다. 배송 벡터는 DB 준비 시 저장해 두고,
+4. `cargo_query`가 있을 때만 임베딩을 생성합니다. 설정에 따라 백엔드가 API를 직접 호출하거나
+  DB의 `azure_openai.create_embeddings`를 호출합니다. 배송 벡터는 DB 준비 시 저장해 두고,
    검색 시에는 질문에서 추출한 화물 검색어의 벡터만 생성합니다. Agent가 검색어를 번역하거나 요약할 수 있습니다.
 5. HorizonDB가 조건을 검사하고 결과를 정렬합니다. 요청 건수와 API 상한 중 작은 값을 적용하고,
    한 행을 더 조회해 `has_more`를 판단한 뒤 표시할 배송만 반환합니다.
@@ -121,6 +140,8 @@ sequenceDiagram
 | 의료기관에 필요한 화물 | `cargo_query: "medical supplies"` | 화물 검색어 임베딩 + 코사인 거리순 | `diskann_cosine` |
 | 지연된 의료용품 배송 | `status: "delayed", cargo_query: "medical supplies"` | 상태 일치 + 코사인 거리순 | `hybrid` |
 | 아시아에서 출발한 의료용품 | `origin_region: "Asia", cargo_query: "medical supplies"` | 출발 좌표에 `ST_Covers` + 코사인 거리순 | `hybrid` |
+| 2026년 9월 15~17일 도착 예정 배송 | `eta_start: "2026-09-15", eta_end: "2026-09-17"` | 저장된 ETA 범위, 양 끝 포함 | `sql` |
+| 현재 부산 반경 500km의 의료용품을 관련성과 거리 가중 순으로 | `cargo_query: "medical supplies", nearby_location: "Busan, South Korea", radius_km: 500, sort_by: "semantic_spatial"` | 반경 조건 + 의미 72%·근접도 28% 점수순 | `hybrid` |
 
 `search_mode`는 다음 규칙으로 결정합니다. SQL·GIS 모드도 내부적으로는 모두 SQL을 실행합니다.
 
@@ -129,7 +150,7 @@ sequenceDiagram
 | `sql` | 화물 의미 검색과 공간 조건 없이 상태·배송 번호·장소명 등으로 조회 | 배송 번호순 |
 | `gis` | 화물 의미 검색 없이 권역·반경·목적지 거리 정렬 중 하나 사용 | 배송 번호순, 목적지 거리 정렬을 요청하면 거리순 |
 | `diskann_cosine` | `cargo_query`만 있고 정확한 상태·번호·장소·권역·반경 조건은 없음 | 코사인 거리 오름차순 |
-| `hybrid` | `cargo_query`와 정확한 조건을 함께 사용 | 조건을 만족하는 결과의 코사인 거리순 |
+| `hybrid` | `cargo_query`와 정확한 조건(ETA 포함)을 함께 사용 | 기본 코사인 거리순, 명시적 `semantic_spatial`은 가중 점수순 |
 | `not_searched` | Agent가 도구를 호출하지 않고 확인 질문으로 응답 | 새 배송 결과 없음 |
 
 `result_limit`만 추가해도 모드가 바뀌지는 않습니다. 화면에서 상태를 선택한 상태로 화물 의미 검색을 하면
@@ -137,6 +158,24 @@ sequenceDiagram
 현재 위치가 아닌 출발·도착 좌표를 검색했더라도 지도 마커는 배송의 `current_position`을 표시합니다.
 
 ### 필터별 의미와 제한
+
+왼쪽 직접 검색은 `POST /api/search/criteria`를 호출하며 Agent의 조건 해석·답변 생성을 거치지 않습니다.
+`Search intent`에 입력한 화물 검색어는 그대로 임베딩합니다. 상태·ETA·위치 조건은 해당 컨트롤에서 지정하며,
+검색어가 비어 있으면 임베딩 없이 조건만으로 조회합니다. 검색 버튼이나 Enter로 적용하기 전에는 결과가 바뀌지 않습니다.
+
+ETA는 중심일과 ±일수(0~365)를 서버에서 날짜 범위로 계산하고 양 끝 날짜를 포함합니다.
+`Map radius`를 켜고 지도를 클릭하면 선택한 좌표와 반경으로 배송의 **현재 위치**를 검사합니다.
+반경은 화면에서 50~3,000km까지 지정합니다. 반경 원은 현재 입력 조건을 표시하며, 검색 뒤 조건을 바꾸면
+`Unapplied changes`가 표시됩니다. 일반 마커 선택은 반경 조건을 추가하지 않습니다.
+
+기본 정렬은 화물 검색어가 있으면 의미 유사도순, 없으면 배송 번호순입니다.
+검색어와 지도 기준점이 모두 있을 때만 의미 72%·근접도 28% 가중 정렬을 선택할 수 있습니다.
+직접 검색은 최대 24건을 반환하고 추가 결과 여부를 표시합니다. `Clear`는 조건·반경·결과를 초기화합니다.
+채팅은 기존처럼 화면의 상태 선택만 추가로 적용하며, 왼쪽 ETA·반경·검색어를 자동으로 가져오지 않습니다.
+채팅 검색이 성공하면 왼쪽 목록은 `Agent matches`로 바뀝니다.
+
+지도 좌표용 `nearby_point`는 수동 검색에서만 받으며 Agent 도구의 JSON Schema에서는 제외합니다.
+모델이 이 필드를 보내더라도 도구 실행 전에 거부합니다. 아래 표의 장소·권역 규칙은 채팅 검색 기준입니다.
 
 | 필드 | 의미와 검사 방식 |
 | --- | --- |
@@ -147,14 +186,34 @@ sequenceDiagram
 | `nearby_location`, `radius_km` | 등록된 기준 도시와 반경을 함께 지정. km를 미터로 바꿔 `ST_DWithin`에 전달 |
 | `position_field` | 반경을 검사할 좌표: `origin`, `destination`, `current`. 기본값은 `current` |
 | `cargo_query` | 화물 의미 검색어. 상태·지리·배송 번호·표시 지시는 넣지 않음 |
-| `sort_by` | 현재는 `destination_distance`만 지원. 현재 위치에서 각 배송의 자기 도착지까지 거리순 |
+| `eta_start`, `eta_end` | ISO 날짜 범위, 양 끝 포함. 한쪽만 지정 가능. 시작일이 종료일보다 늦으면 거부하며 ETA가 없는 레코드는 제외 |
+| `sort_by` | `destination_distance`는 각 배송의 자기 도착지 거리순. `semantic_spatial`은 화물 의미와 기준점 근접도 가중 점수순 |
 | `result_limit` | 요청 건수 1~24. 실제 표시 건수는 API의 `limit` 상한도 적용 |
 
-지원하지 않는 국가 전체 조건, 날짜 범위, 임의의 제외 조건, 등록되지 않은 장소는 확인 질문 대상으로
+지원하지 않는 국가 전체 조건, 임의의 제외 조건, 등록되지 않은 장소는 확인 질문 대상으로
 지시합니다. `도착이 임박한 배송`처럼 거리와 ETA 중 기준이 불분명하면 먼저 기준을 확인합니다.
 ETA 정렬과 화물 의미 검색·목적지 거리 정렬의 동시 사용은 지원하지 않습니다.
 거리순 검색의 기본 배송 완료 제외는 코드에 정해진 동작이며, 일반적인 제외 조건 지원을 뜻하지 않습니다.
 입력 검사나 외부 API·DB 호출이 실패하면 오류로 처리하며, 이를 검색 결과 0건이나 확인 질문으로 바꾸지 않습니다.
+
+ETA의 오늘·내일·이번 주·다음 주는 요청을 시작할 때 `SEARCH_TIMEZONE`(기본 `Asia/Seoul`)의 날짜를
+모델 지침에 넣어 해석합니다. 주 단위는 월요일부터 일요일이며, 중심 날짜 ±N일은 시작일·종료일로
+변환합니다. 모호한 기간은 확인 질문을 합니다. 날짜 계산은 모델이 하므로 실행 내역에서 확정된 날짜를
+확인해야 합니다. 이 조건은 저장된 도착 예정일을 검사하며 실제 도착 이력을 조회하지 않습니다.
+
+`semantic_spatial`은 `cargo_query`, `nearby_location`, `radius_km`이 모두 있어야 합니다.
+`position_field`의 좌표에서 기준 도시까지 거리를 계산하고 아래 점수를 내림차순으로 정렬합니다.
+동점은 배송 번호순입니다. 반경만 지정한 일반 의미 검색의 순서는 바뀌지 않습니다.
+
+```text
+hybrid_score = 0.72 * cosine_similarity
+             + 0.28 * max(0, 1 - distance_to_center_km / radius_km)
+```
+
+점수는 확률이 아니며 음수가 될 수 있습니다. `distance_to_center_km`는 기준점까지 거리이고
+`remaining_distance_km`는 각 배송의 자기 도착지까지 거리입니다. 가중 정렬은 조건에 맞는 전체 레코드를
+평가한 뒤 LIMIT을 적용합니다. 벡터 상위 후보만 먼저 추려 생기는 가중 순위 누락은 피하지만,
+데이터가 커지면 비용이 증가하고 DiskANN의 근사 최근접 탐색 성능을 그대로 기대할 수 없습니다.
 
 ### SQL 구성 예시
 
@@ -210,8 +269,8 @@ LIMIT %s;
 
 ### 결과 표시와 지도 동작
 
-화면에는 실제 검색 방식, 적용 조건, 표시 건수를 보여줍니다. 요청당 최대 8건을 표시하고,
-결과가 더 있으면 `has_more`로 알립니다. 전체 조회나 페이지 이동 기능은 아직 없습니다.
+화면에는 실제 검색 방식, 적용 조건, 표시 건수를 보여줍니다. 채팅은 요청당 최대 8건, 직접 조건 검색은
+최대 24건을 표시하며, 결과가 더 있으면 `has_more`로 알립니다. 검색 결과의 페이지 이동 기능은 아직 없습니다.
 SQL·GIS 검색 결과에는 유사도 대신 `조건 일치`를 표시합니다. 화물 의미 검색은 관련성 순위이며
 품목 분류의 정확한 일치를 보장하지 않습니다. 조건에 맞는 결과가 없더라도 조건을 풀거나 재검색하지 않습니다.
 화면에서 선택한 상태 필터는 질문에서 추론한 상태보다 우선합니다.
@@ -221,7 +280,8 @@ SQL·GIS 검색 결과에는 유사도 대신 `조건 일치`를 표시합니다
 동일 거리에서는 배송 번호순으로 정렬합니다. 특정 목적지·권역·상태 조건을 함께 적용할 수 있습니다.
 상태를 지정하지 않으면 배송 완료 건을 제외합니다. 요청 건수는 API의 limit(화면에서는 8건)을 넘지 않습니다.
 거리는 지표면 최단거리이며 실제 항로 거리나 도착 예상 시간이 아닙니다. 거리 정렬과 화물 의미 검색의
-동시 사용, ETA 정렬은 아직 지원하지 않습니다. 이전 대화 조건은 자동으로 이어받지 않으므로
+동시 사용은 자기 목적지 거리 정렬에 한해 제한됩니다. 기준점과의 가중 정렬은 별도 기능이며,
+ETA 범위 조건은 지원하지만 ETA 순 정렬은 지원하지 않습니다. 이전 대화 조건은 자동으로 이어받지 않으므로
 `로테르담으로 가는 운송 중 배송 중 목적지에 가장 가까운 2개`처럼 전체 조건을 함께 입력합니다.
 
 AI 결과 카드의 본문을 누르면 배송을 선택하고 상세를 표시합니다. `현재 위치 보기`는 현재 마커로
@@ -256,18 +316,20 @@ AI 결과 카드의 본문을 누르면 배송을 선택하고 상세를 표시�
 
 특정 장소명과 반경 기준점은 [backend/app/search_locations.py](backend/app/search_locations.py)의
 샘플 도시 목록을 계속 사용합니다. 새 도시를 반경 중심점이나 장소명 조건으로 조회하려면 목록에 추가합니다.
-지원하지 않는 국가·날짜·제외 조건 등을 벡터 검색으로 대신 처리하지 않도록 Agent에 지시합니다.
+지원하지 않는 국가·제외 조건 등을 벡터 검색으로 대신 처리하지 않도록 Agent에 지시합니다.
 
 반경은 등록된 도시 좌표를 중심으로 `geography` 거리(미터)로 검사합니다. 항로 거리나 항만 경계 검사가 아닙니다.
 경계 테이블만 추가하며 기존 배송 데이터·임베딩은 그대로 유지합니다. 데이터가 커지면
 출발지·도착지 geometry GiST 인덱스와 `geography` 표현식 GiST 인덱스를 실행 계획에 맞게 추가해야 합니다.
+스키마에는 ETA B-tree와 현재 위치의 geography 표현식 GiST 인덱스가 포함됩니다.
 기존 geometry 인덱스가 geography 형변환 검색에도 사용된다고 가정하지 않습니다.
 
 `POST /api/search`는 기존의 벡터 검색 직접 호출 API로 유지합니다.
 `POST /api/chat`과 `POST /api/chat/stream`은 같은 구조화 조건 도구를 사용하며 응답 전송 방식만 다릅니다.
 응답의 `search_mode`는 `sql`, `gis`, `diskann_cosine`, `hybrid` 중 하나이며, 확인 질문은 `not_searched`입니다.
 `diskann_cosine`이나 `hybrid`는 검색 경로 이름이며 실제 DiskANN Index Scan 실행을 보장하지 않습니다.
-앱 시작 시 일곱 권역의 적재 여부와 기존 벡터 준비 상태를 검사합니다.
+앱 시작 시 일곱 권역과 기존 벡터 준비 상태, SQ4 DiskANN 인덱스의 유효 상태를 검사합니다.
+DB provider를 선택하면 필요한 함수·alias 존재와 embedding alias의 endpoint·deployment도 검사합니다.
 SQL 검색만 사용하더라도 초기 DB·임베딩 준비는 필요합니다.
 
 ### 데모 실행 내역
@@ -277,7 +339,7 @@ SQL 검색만 사용하더라도 초기 DB·임베딩 준비는 필요합니다.
 답변 작성 순서로 기록하며, 완료·실패·중단 후에도 해당 답변의 `실행 내역`에서 다시 확인할 수 있습니다.
 답변 본문은 완성 후 한 번에 전달합니다. 모델의 내부 추론이나 토큰 단위 응답 스트리밍은 표시하지 않습니다.
 
-임베딩 단계의 `임베딩 API 입력 검색어`는 벡터 변환 전에 실제 API로 보내는 `cargo_query` 문자열입니다.
+임베딩 단계의 `임베딩 입력 검색어`는 벡터 변환 전에 실제 모델로 보내는 `cargo_query` 문자열입니다.
 사용자 질문 전체가 아니라 Agent가 추출한 화물 검색어이며 원문 그대로 표시합니다. 상태·권역 조건만 있는
 검색에서는 임베딩 단계가 나타나지 않습니다. SQL·바인딩 값은 Repository가 Psycopg에 전달하는 내용이며,
 문자열을 끼워 넣은 실행 SQL을 임의로 만들지 않습니다. 바인딩 값은 `%s` 순서대로 표시하되 벡터 숫자는
@@ -292,6 +354,21 @@ SQL 이벤트는 실행 직전에 전송되므로 그 자체가 성공을 뜻하
 구분합니다. DB 조회 시간은 execute와 fetch 시간이며 서버 전용 실행 시간이나 실행 계획은 아닙니다.
 트랜잭션 시작·종료와 풀 내부의 SQL까지 추적하는 DB 감사 로그는 아닙니다.
 DB 수신 행 수에는 추가 결과 확인용 한 행이 포함될 수 있어 화면 전달 건수와 다를 수 있습니다.
+
+`CAPTURE_QUERY_PLAN=true`이면 같은 바인딩 값으로 `EXPLAIN (FORMAT JSON)`을 한 번 조회합니다.
+이는 **예상 계획**이며 `ANALYZE`를 실행하지 않으므로 실제 실행 시간이나 buffer hit 수가 아닙니다.
+검색 벡터를 먼저 생성해 재사용하므로 계획 조회 때문에 모델을 다시 호출하지 않습니다.
+노드·인덱스·예상 행 수·비용만 허용하고 벡터 상수가 노출될 수 있는 Filter·Order By·Output은 제거합니다.
+해당 요청의 실행 내역에서 `실행 계획 보기` 버튼을 누르면 SQL·바인딩 값과 계획 그래프를 팝업으로 표시합니다.
+그래프와 JSON을 전환하고 각 내용을 복사할 수 있습니다. 모바일에서는 SQL과 계획을 위아래로 배치합니다.
+SQL은 CodeMirror 읽기 전용 viewer에서 구문 강조·줄 번호·정돈·자동 줄바꿈을 지원합니다.
+정돈은 화면 표시용이며 SQL 복사는 원본을 사용합니다. SQL과 EXPLAIN의 초기 비율은 6:4이고,
+가운데 분할선을 드래그하거나 방향키로 조절할 수 있습니다. 분할선을 두 번 클릭하면 6:4로 돌아갑니다.
+계획 노드를 선택하면 SQL 구문 트리에서 LIMIT·ORDER BY·GROUP BY·테이블 참조 중 대응되는 범위를 강조합니다.
+PostgreSQL 계획에는 원문 위치 정보가 없으므로 이 연결은 추정입니다. 같은 범위 후보가 여러 개이거나
+optimizer가 만든 join처럼 직접 대응하지 않는 노드는 강조하지 않고 연결할 수 없음을 표시합니다.
+팝업은 저장된 요청별 이벤트만 사용하며, 다시 열어도 DB나 모델을 호출하지 않습니다. 전역 `last plan` 저장소는 없습니다.
+계획 조회의 DB 오류는 별도 이벤트로 표시하고 검색은 계속합니다. 실제 검색 오류는 그대로 실패 처리합니다.
 
 요청별 이벤트에는 요청 ID·순번·서버 경과시간이 포함됩니다. 10초간 새 이벤트가 없으면 heartbeat를 보내고,
 서버는 120초, 브라우저는 150초에 timeout을 처리합니다. 중단 버튼·연결 종료는 해당 요청의 비동기 작업을
@@ -322,6 +399,75 @@ DB 수신 행 수에는 추가 결과 확인용 한 행이 포함될 수 있어 
 | [frontend/src/components/ChatPanel.tsx](frontend/src/components/ChatPanel.tsx) | 한국어 답변, 실행 내역, 검색 조건·결과 카드 표시 |
 
 ## 로컬 실행
+
+### 모델 호출 위치 선택
+
+[환경 변수 예제](backend/.env.example)의 기본값은 기존 직접 호출을 유지합니다.
+채팅은 `CHAT_PROVIDER`, 검색어와 초기 backfill은 `EMBEDDING_PROVIDER`로 각각 선택합니다.
+배송 변경의 `on_change` pipeline은 어느 설정에서도 그대로 DB에서 실행합니다.
+
+| 설정 | `azure_openai` | `horizondb` |
+| --- | --- | --- |
+| `CHAT_PROVIDER` | 기존 OpenAIChatClient, native tool calling | `azure_ai.generate(prompt, alias, system_prompt)`로 JSON 계획·최종 답변 생성 |
+| `EMBEDDING_PROVIDER` | OpenAI SDK로 검색어·초기 backfill 생성 | `azure_openai.create_embeddings(alias, input)`로 같은 입력·1536차원 생성 |
+
+DB 채팅 adapter는 기존 Agent 지침을 두 호출에 모두 전달합니다. 응답 JSON은 `search` 또는 `clarify`로
+검사하며, 검색은 기존 Python 도구를 한 번 실행하고 확인 질문은 도구를 실행하지 않습니다.
+JSON 오류·호출 오류를 다른 provider로 자동 fallback하지 않습니다. inference 자체는 외부 Foundry에서
+실행되며, DB 안에서 Python 도구를 실행하거나 임의의 SQL을 생성하는 방식은 아닙니다.
+
+준비된 DB를 전환할 때는 환경 설정에서 다음 값을 지정합니다.
+
+```dotenv
+CHAT_PROVIDER=horizondb
+CHAT_MODEL_ALIAS=horizonship-chat
+EMBEDDING_PROVIDER=horizondb
+EMBEDDING_MODEL_ALIAS=horizonship-embedding
+CAPTURE_QUERY_PLAN=true
+MODEL_TIMEOUT_SECONDS=45
+SEARCH_TIMEZONE=Asia/Seoul
+```
+
+이후 backend 폴더에서 아래 명령으로 alias를 준비하고 앱을 재시작합니다.
+
+```bash
+uv run python -m app.setup_database --models-only
+```
+
+이 명령은 스키마·샘플·벡터·인덱스·pipeline을 변경하지 않습니다. 새 alias를 등록하거나 metadata가
+같은 alias의 key를 갱신하며, 다른 endpoint·deployment·모델로 등록된 alias는 오류로 중단합니다.
+현재 외부 모델 등록에는 `AZURE_OPENAI_KEY`가 필요합니다. 이미 등록된 DB 모델로 앱을 실행할 때는
+두 provider가 모두 `horizondb`이면 앱의 모델 key 없이도 호출할 수 있지만 DB 접속 정보와 기존 벡터의
+endpoint·deployment 설정은 여전히 필요합니다. 기본 alias가 서버에 미리 있다고 가정하지 않습니다.
+
+전체 setup은 샘플을 갱신하고 인덱스를 다시 만드므로 모델 전환만을 위해 실행하지 않습니다.
+기존 DB에는 다음 DDL로 새 조회 인덱스만 추가할 수 있습니다. `CONCURRENTLY`는 인덱스를 생성하는 동안
+일반 쓰기 작업을 허용합니다. 트랜잭션 블록 밖에서 두 명령을 각각 실행하며, 운영 환경에서는 부하와
+장기 실행 트랜잭션을 확인한 뒤 적용합니다. 같은 이름의 인덱스가 있으면 정의와 유효 상태도 확인해야 합니다.
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS shipments_eta_idx
+  ON horizon_ship.shipments (eta);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS shipments_current_geography_idx
+  ON horizon_ship.shipments USING gist ((current_position::public.geography));
+```
+
+2026-09-15 실제 DB에 위 두 인덱스를 추가하고 `indisvalid`, `indisready`가 모두 true인지 확인했습니다.
+적용 전후 배송 24건·임베딩 24건·작업 큐 0건의 건수와 데이터 해시가 동일했습니다.
+기존 geometry 인덱스, DiskANN 인덱스와 임베딩 pipeline은 변경하지 않았습니다.
+
+runtime DB 모델 호출은 호출마다 풀 연결을 점유하고 트랜잭션에 `MODEL_TIMEOUT_SECONDS`의
+statement timeout을 적용합니다. 긴 모델 응답은 DB 연결 대기와 비용에 영향을 줍니다. 초기 setup은
+별도 동기 작업이며 이 runtime 제한을 적용하지 않습니다. 취소해도 외부 모델 비용이 이미 발생할 수 있습니다.
+직접 호출로 되돌릴 때는 provider를 `azure_openai`로 지정하고 재시작합니다. 저장된 벡터는 유지됩니다.
+
+2026-09-15 재검증에서 DB 연결이 복구됐고 `azure_ai 2.2.2`의 text 생성 함수와 1536차원 embedding
+호출을 확인했습니다. `horizonship-chat` alias 등록 후 두 provider를 `horizondb`로 지정한 실제 검사에서
+ETA 검색은 12.6초에 3건, ETA·반경 조건을 포함한 가중 검색은 16.4초에 상위 3건을 반환했습니다.
+확인 질문은 3.5초에 검색 없이 완료됐습니다. 검색의 예상 계획과 가중 점수 계산도 확인했습니다.
+이는 해당 환경의 한 차례 측정값이며 응답 시간을 보장하지 않습니다. 새 환경에서는 설치된 함수
+signature, alias, DB에서 Foundry로의 접근을 다시 확인해야 합니다. 시작 시 함수 존재 검사만으로
+모델 호환성의 종단 간 검증을 대신하지는 않습니다.
 
 Python 백엔드와 React 프론트엔드를 각각 별도 터미널에서 소스로 실행합니다.
 미리 빌드한 애플리케이션은 필요하지 않습니다.
@@ -444,10 +590,11 @@ AZURE_EMBED_DEPLOYMENT=text-embedding-3-small
 
 현재 `azure_ai 2.2.2`의 BYOM pipeline 등록에는 subscription key가 필요합니다.
 따라서 `app.setup_database`를 실행할 때 `AZURE_OPENAI_KEY`를 비워 둘 수 없습니다.
-setup은 이 값을 HorizonDB model registry에 등록하고, backend의 채팅과 검색어 임베딩에도 사용합니다.
+setup은 이 값을 HorizonDB model registry에 등록합니다. 직접 호출 provider는 backend에서도 사용하고,
+DB provider는 등록된 alias로 호출합니다.
 
 기존 외부 Foundry에서 key 인증을 허용한다면 로컬 설정의 `AZURE_OPENAI_KEY`에 유효한 key를 입력합니다.
-key가 있으면 채팅과 임베딩 모두 해당 key를 사용하며 Entra ID로 자동 재시도하지 않습니다.
+직접 호출 provider는 key가 있으면 해당 key를 사용하며 Entra ID로 자동 재시도하지 않습니다.
 배포 스크립트는 외부 Foundry를 수정하거나 key를 조회하지 않습니다. 노출된 key는 폐기·재발급하고,
 채팅·소스·로그에는 넣지 마세요.
 
@@ -480,7 +627,7 @@ setup은 subscription key를 DB model registry에 저장하므로 DB 관리자 �
 포털에서 복사한 `/openai/v1/responses` 또는 `/openai/v1/embeddings` 주소도 받으며 SDK용 주소로 정규화합니다.
 `/api/projects/...` 형식의 project endpoint는 사용하지 않습니다. 임베딩은 OpenAI v1 API를 호출합니다.
 채팅·임베딩 deployment는 같은 리소스 안에 있어야 하며, 외부 리소스에서 이름을 바꿔 배포했다면 환경 변수도 맞춥니다.
-key 인증 여부와 관계없이 백엔드에서 해당 endpoint에 네트워크로 접근할 수 있어야 합니다.
+직접 호출은 backend에서, DB 호출은 HorizonDB에서 해당 endpoint에 네트워크로 접근할 수 있어야 합니다.
 DB 접속 인증은 별개이므로 기존 PostgreSQL 사용자 이름과 비밀번호가 필요합니다.
 
 파일에 있는 연결 풀 설정은 그대로 둡니다. 백엔드의 `.env` 파일은 Git 추적 대상에서 제외되어 있습니다.

@@ -1,5 +1,7 @@
 import type {
   DatabaseCapabilities,
+  CriteriaSearchRequest,
+  CriteriaSearchResponse,
   SearchResponse,
   SearchProgress,
   Shipment,
@@ -35,6 +37,13 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function getCapabilities(): Promise<DatabaseCapabilities> {
   return apiRequest('/api/health')
+}
+
+export function searchCriteria(request: CriteriaSearchRequest, signal: AbortSignal): Promise<CriteriaSearchResponse> {
+  return apiRequest('/api/search/criteria', {
+    method: 'POST', body: JSON.stringify(request),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
+  })
 }
 
 export function getShipments(): Promise<Shipment[]> {

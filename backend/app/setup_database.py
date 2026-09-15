@@ -1,4 +1,5 @@
 import argparse
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -8,11 +9,13 @@ from psycopg.types.json import Jsonb
 
 from app.config import Settings
 from app.embeddings import (
+    DATABASE_EMBEDDING_SQL,
     EMBEDDING_DIMENSIONS,
     embedding_client,
     model_registry_endpoint,
     openai_base_url,
     serialize_embeddings,
+    validate_vector_text,
 )
 from app.models import Shipment
 from app.region_boundaries import load_region_boundaries
@@ -236,16 +239,22 @@ def configure_pipeline_model(
     connection: psycopg.Connection[Any],
     settings: Settings,
 ) -> None:
+    configure_model(connection, settings, settings.embedding_model_alias, settings.azure_embed_deployment)
+
+
+def configure_model(
+    connection: psycopg.Connection[Any], settings: Settings, alias: str, deployment: str,
+) -> None:
     if not settings.azure_openai_key:
         raise RuntimeError(
             "AZURE_OPENAI_KEY is required to register the HorizonDB pipeline model"
         )
 
     expected = (
-        settings.embedding_model_alias,
+        alias,
         model_registry_endpoint(settings.azure_openai_endpoint),
-        settings.azure_embed_deployment,
-        settings.azure_embed_deployment,
+        deployment,
+        deployment,
         "subscription-key",
     )
     with connection.cursor() as cursor:
@@ -255,7 +264,7 @@ SELECT alias, endpoint, deployment_name, model_name, auth_type
 FROM model_registry.model_list_all()
 WHERE alias = %s;
 """,
-            (settings.embedding_model_alias,),
+            (alias,),
         )
         current = cursor.fetchone()
         if current is None:
@@ -276,13 +285,17 @@ SELECT model_registry.model_add(
             return
         if tuple(current) != expected:
             raise RuntimeError(
-                f"Model alias {settings.embedding_model_alias!r} is registered "
+                f"Model alias {alias!r} is registered "
                 "with different nonsecret metadata"
             )
         cursor.execute(
             "SELECT model_registry.model_key_update(%s, %s);",
-            (settings.embedding_model_alias, settings.azure_openai_key),
+            (alias, settings.azure_openai_key),
         )
+
+
+def configure_chat_model(connection: psycopg.Connection[Any], settings: Settings) -> None:
+    configure_model(connection, settings, settings.chat_model_alias, settings.azure_openai_deployment)
 
 
 def migrate_legacy_embeddings(connection: psycopg.Connection[Any]) -> int:
@@ -338,20 +351,26 @@ def backfill_embeddings(
     settings: Settings,
 ) -> int:
     embedded = 0
-    with embedding_client(settings) as client:
+    with (embedding_client(settings) if settings.embedding_provider == "azure_openai" else nullcontext()) as client:
         while True:
             with connection.cursor() as cursor:
                 cursor.execute(EMBED_BATCH_SQL, (settings.embedding_batch_size,))
                 batch = cursor.fetchall()
                 if not batch:
                     return embedded
-                response = client.embeddings.create(
-                    model=settings.azure_embed_deployment,
-                    input=[row[1] for row in batch],
-                    dimensions=EMBEDDING_DIMENSIONS,
-                    encoding_format="float",
-                )
-                vectors = serialize_embeddings(response, len(batch))
+                if client is None:
+                    vectors = []
+                    for row in batch:
+                        cursor.execute(DATABASE_EMBEDDING_SQL, (settings.embedding_model_alias, row[1]))
+                        vectors.append(validate_vector_text(cursor.fetchone()[0]))
+                else:
+                    response = client.embeddings.create(
+                        model=settings.azure_embed_deployment,
+                        input=[row[1] for row in batch],
+                        dimensions=EMBEDDING_DIMENSIONS,
+                        encoding_format="float",
+                    )
+                    vectors = serialize_embeddings(response, len(batch))
                 cursor.executemany(
                     """
 INSERT INTO horizon_ship.shipment_embeddings (
@@ -468,6 +487,8 @@ def setup_database(
     with psycopg.connect(database_conninfo) as connection:
         apply_schema(connection)
         configure_pipeline_model(connection, settings)
+        if settings.chat_provider == "horizondb":
+            configure_chat_model(connection, settings)
         load_region_boundaries(connection)
         seed_shipments(connection)
 
@@ -501,6 +522,11 @@ def parse_args() -> argparse.Namespace:
         description="Create and populate the HorizonShip HorizonDB schema."
     )
     parser.add_argument(
+        "--models-only",
+        action="store_true",
+        help="Register or verify model aliases without seeding data or rebuilding indexes.",
+    )
+    parser.add_argument(
         "--force-embeddings",
         action="store_true",
         help="Regenerate every Azure OpenAI embedding before rebuilding DiskANN.",
@@ -510,6 +536,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.models_only:
+        settings = Settings()
+        settings.validate_live_configuration()
+        with psycopg.connect(settings.database_conninfo, connect_timeout=10) as connection:
+            configure_pipeline_model(connection, settings)
+            if settings.chat_provider == "horizondb":
+                configure_chat_model(connection, settings)
+        print("HorizonDB model aliases are ready; shipment data was not changed.")
+        return
     result = setup_database(
         Settings(),
         force_embeddings=args.force_embeddings,

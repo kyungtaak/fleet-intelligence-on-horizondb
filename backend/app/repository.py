@@ -10,10 +10,12 @@ from psycopg_pool import AsyncConnectionPool
 
 from app.config import Settings
 from app.embeddings import (
+    DATABASE_EMBEDDING_SQL,
     EMBEDDING_DIMENSIONS,
     async_embedding_client,
     openai_base_url,
     serialize_embeddings,
+    validate_vector_text,
 )
 from app.models import (
     Coordinate,
@@ -41,6 +43,19 @@ SET SESSION diskann.selectivity_threshold TO '1.0';
 SET SESSION diskann.filtering_beta TO 0.85;
 SET SESSION diskann.l_value_is TO 300;
 """
+
+PLAN_FIELDS = frozenset({
+    "Node Type", "Parent Relationship", "Relation Name", "Schema", "Alias", "Index Name",
+    "Scan Direction", "Join Type", "Strategy", "Startup Cost", "Total Cost", "Plan Rows",
+    "Plan Width", "Parallel Aware",
+})
+
+
+def sanitize_plan(node: Mapping[str, Any]) -> dict[str, Any]:
+    result = {key: value for key, value in node.items() if key in PLAN_FIELDS}
+    if "Plans" in node:
+        result["Plans"] = [sanitize_plan(child) for child in node["Plans"]]
+    return result
 
 
 async def configure_search_connection(connection: AsyncConnection[Any]) -> None:
@@ -72,6 +87,8 @@ _SHIPMENT_COLUMNS = """
 class ShipmentRepository(Protocol):
     mode: str
     search_mode: str
+
+    async def generate_text(self, prompt: str, system_prompt: str) -> str: ...
 
     async def list_shipments(
         self,
@@ -152,6 +169,8 @@ def _row_to_shipment(row: Mapping[str, Any]) -> Shipment:
             float(row["remaining_distance_km"])
             if row.get("remaining_distance_km") is not None else None
         ),
+        distance_to_center_km=row.get("distance_to_center_km"),
+        hybrid_score=row.get("hybrid_score"),
     )
 
 
@@ -219,14 +238,16 @@ class PostgresShipmentRepository:
             max_size=settings.database_pool_max_size,
             open=False,
             configure=configure_search_connection,
-            kwargs={"row_factory": dict_row},
+            kwargs={"row_factory": dict_row, "connect_timeout": int(settings.database_connect_timeout_seconds)},
         )
         self._connect_timeout = settings.database_connect_timeout_seconds
         self._model_alias = settings.embedding_model_alias
         self._settings = settings
+        self.chat_model_name = settings.chat_model_alias
 
     async def open(self) -> None:
         await self._pool.open(wait=True, timeout=self._connect_timeout)
+        await self._validate_model_readiness()
         await self._validate_search_readiness()
         async with self._pool.connection() as connection:
             cursor = await connection.execute(
@@ -239,6 +260,71 @@ class PostgresShipmentRepository:
     async def close(self) -> None:
         await self._pool.close()
 
+    async def _validate_model_readiness(self) -> None:
+        aliases = []
+        if self._settings.chat_provider == "horizondb":
+            aliases.append(self._settings.chat_model_alias)
+        if self._settings.embedding_provider == "horizondb":
+            aliases.append(self._model_alias)
+        if not aliases:
+            return
+        async with self._pool.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT namespace.nspname AS schema, procedure.proname AS name "
+                "FROM pg_catalog.pg_proc AS procedure "
+                "JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = procedure.pronamespace "
+                "WHERE (namespace.nspname, procedure.proname) IN "
+                "(('azure_ai', 'generate'), ('azure_openai', 'create_embeddings'));"
+            )
+            functions = {(row["schema"], row["name"]) for row in await cursor.fetchall()}
+            if (
+                self._settings.chat_provider == "horizondb" and ("azure_ai", "generate") not in functions
+                or self._settings.embedding_provider == "horizondb"
+                and ("azure_openai", "create_embeddings") not in functions
+            ):
+                raise RuntimeError("Selected database model functions are unavailable")
+            cursor = await connection.execute(
+                "SELECT alias, model_name, endpoint, deployment_name "
+                "FROM model_registry.model_list_all() WHERE alias = ANY(%s);", (aliases,),
+            )
+            rows = {row["alias"]: row for row in await cursor.fetchall()}
+        if set(aliases) - rows.keys():
+            raise RuntimeError("Configured HorizonDB model aliases are missing; register models first")
+        if self._settings.chat_provider == "horizondb":
+            self.chat_model_name = rows[self._settings.chat_model_alias]["model_name"]
+        if self._settings.embedding_provider == "horizondb":
+            model = rows[self._model_alias]
+            if (
+                openai_base_url(model["endpoint"]) != openai_base_url(self._settings.azure_openai_endpoint)
+                or model["deployment_name"] != self._settings.azure_embed_deployment
+            ):
+                raise RuntimeError("Database embedding alias differs from the stored vector configuration")
+
+    async def generate_text(self, prompt: str, system_prompt: str) -> str:
+        report_progress(
+            "model_start", "HorizonDB에서 모델을 호출하고 있습니다.",
+            provider="horizondb", model_alias=self._settings.chat_model_alias,
+        )
+        started = monotonic()
+        async with self._pool.connection() as connection, connection.transaction():
+            await connection.execute(
+                "SELECT set_config('statement_timeout', %s, true);",
+                (f"{self._settings.model_timeout_seconds}s",),
+            )
+            cursor = await connection.execute(
+                "SELECT azure_ai.generate(%s, %s, %s) AS answer;",
+                (prompt, self._settings.chat_model_alias, system_prompt),
+            )
+            row = await cursor.fetchone()
+        if row is None or not isinstance(row["answer"], str) or not row["answer"].strip():
+            raise ValueError("HorizonDB returned an empty model response")
+        report_progress(
+            "model_result", "HorizonDB 모델 응답을 받았습니다.",
+            provider="horizondb", model_alias=self._settings.chat_model_alias,
+            duration_ms=round((monotonic() - started) * 1000),
+        )
+        return row["answer"]
+
     async def _validate_search_readiness(self) -> None:
         query = """
 SELECT
@@ -249,8 +335,15 @@ SELECT
         FROM horizon_ship.embedding_configuration
         WHERE singleton = true AND endpoint = %s AND deployment = %s AND dimensions = %s
     ) AS configuration_matches,
-    to_regclass('horizon_ship.shipment_embeddings_diskann_idx') IS NOT NULL
-		AS index_ready
+    EXISTS (
+        SELECT 1 FROM pg_catalog.pg_index AS index
+        JOIN pg_catalog.pg_class AS relation ON relation.oid = index.indexrelid
+        JOIN pg_catalog.pg_am AS method ON method.oid = relation.relam
+        WHERE index.indexrelid = to_regclass('horizon_ship.shipment_embeddings_diskann_idx')
+            AND index.indrelid = 'horizon_ship.shipment_embeddings'::regclass
+            AND index.indisvalid AND index.indisready AND method.amname = 'diskann'
+            AND relation.reloptions @> ARRAY['spherical_quantized=true', 'sq_bits=4']
+    ) AS index_ready
 FROM horizon_ship.shipments AS shipment
 LEFT JOIN horizon_ship.shipment_embeddings AS embedding
     ON embedding.shipment_id = shipment.id;
@@ -332,11 +425,13 @@ ORDER BY s.shipment_number;
             filters.status, filters.shipment_number, filters.origin_region,
             filters.destination_region, filters.origin_name, filters.destination_name,
             filters.nearby_location,
+            filters.nearby_point,
+            filters.eta_start, filters.eta_end,
         ))
         mode = (
             "hybrid" if filters.cargo_query and exact_conditions
             else "diskann_cosine" if filters.cargo_query
-            else "gis" if any((filters.nearby_location, filters.origin_region, filters.destination_region, filters.sort_by))
+            else "gis" if any((filters.nearby_location, filters.nearby_point, filters.origin_region, filters.destination_region, filters.sort_by))
             else "sql"
         )
         return ShipmentSearchResult(
@@ -351,6 +446,8 @@ ORDER BY s.shipment_number;
         vector_join = ""
         similarity = "NULL::double precision"
         remaining_distance = "NULL::double precision"
+        center_distance = "NULL::double precision"
+        hybrid_score = "NULL::double precision"
         ordering = "s.shipment_number"
         if filters.sort_by == "destination_distance":
             if filters.cargo_query:
@@ -365,15 +462,30 @@ ORDER BY s.shipment_number;
                 "embedding", "화물 검색어를 임베딩 API에 전달하고 있습니다.",
                 embedding_input=filters.cargo_query,
                 deployment=self._settings.azure_embed_deployment,
+                provider=self._settings.embedding_provider,
+                model_alias=self._model_alias if self._settings.embedding_provider == "horizondb" else None,
             )
-            async with async_embedding_client(self._settings) as client:
-                response = await client.embeddings.create(
-                    model=self._settings.azure_embed_deployment,
-                    input=[filters.cargo_query],
-                    dimensions=EMBEDDING_DIMENSIONS,
-                    encoding_format="float",
-                )
-            parameters.append(serialize_embeddings(response, 1)[0])
+            if self._settings.embedding_provider == "horizondb":
+                async with self._pool.connection() as connection, connection.transaction():
+                    await connection.execute(
+                        "SELECT set_config('statement_timeout', %s, true);",
+                        (f"{self._settings.model_timeout_seconds}s",),
+                    )
+                    cursor = await connection.execute(
+                        DATABASE_EMBEDDING_SQL, (self._model_alias, filters.cargo_query),
+                    )
+                    row = await cursor.fetchone()
+                vector = validate_vector_text(row["embedding"])
+            else:
+                async with async_embedding_client(self._settings) as client:
+                    response = await client.embeddings.create(
+                        model=self._settings.azure_embed_deployment,
+                        input=[filters.cargo_query],
+                        dimensions=EMBEDDING_DIMENSIONS,
+                        encoding_format="float",
+                    )
+                vector = serialize_embeddings(response, 1)[0]
+            parameters.append(vector)
             report_progress("embedding_ready", "검색어 벡터를 생성했습니다.", dimensions=EMBEDDING_DIMENSIONS)
             vector_cte = "WITH query_vector AS (SELECT %s::public.vector(1536) AS embedding)"
             vector_join = """JOIN horizon_ship.shipment_embeddings AS se
@@ -383,6 +495,27 @@ LEFT JOIN horizon_ship.shipment_embedding_jobs AS sej
 CROSS JOIN query_vector"""
             similarity = "1 - (se.embedding <=> query_vector.embedding)"
             ordering = "se.embedding <=> query_vector.embedding"
+
+        if filters.sort_by == "semantic_spatial":
+            coordinate = filters.nearby_point or LOCATION_COORDINATES[filters.nearby_location]
+            position = {
+                "origin": "origin_position", "destination": "destination_position",
+                "current": "current_position",
+            }[filters.position_field]
+            vector_cte += (
+                ", search_center AS (SELECT public.ST_SetSRID(public.ST_MakePoint(%s, %s), "
+                "4326)::public.geography AS point, %s::double precision AS radius_km)"
+            )
+            parameters.extend((coordinate.longitude, coordinate.latitude, filters.radius_km))
+            vector_join += "\nCROSS JOIN search_center"
+            center_distance = (
+                f"public.ST_Distance(s.{position}::public.geography, search_center.point) / 1000.0"
+            )
+            hybrid_score = (
+                f"0.72 * ({similarity}) + 0.28 * GREATEST(0.0, "
+                f"1.0 - ({center_distance}) / search_center.radius_km)"
+            )
+            ordering = "hybrid_score DESC, s.shipment_number ASC"
 
         status_value = filters.status.value if filters.status else None
         conditions = ["(%s::text IS NULL OR s.status = %s)"]
@@ -394,6 +527,12 @@ CROSS JOIN query_vector"""
         if filters.sort_by == "destination_distance" and filters.status is None:
             conditions.append("s.status <> %s")
             parameters.append(ShipmentStatus.DELIVERED.value)
+        if filters.eta_start is not None:
+            conditions.append("s.eta >= %s::date")
+            parameters.append(filters.eta_start)
+        if filters.eta_end is not None:
+            conditions.append("s.eta <= %s::date")
+            parameters.append(filters.eta_end)
         for column, value in (
             ("shipment_number", filters.shipment_number),
             ("origin_name", filters.origin_name),
@@ -412,8 +551,8 @@ CROSS JOIN query_vector"""
                     f"WHERE region.name = %s AND public.ST_Covers(region.boundary, s.{column}))"
                 )
                 parameters.append(region)
-        if filters.nearby_location:
-            coordinate = LOCATION_COORDINATES[filters.nearby_location]
+        if filters.nearby_location or filters.nearby_point:
+            coordinate = filters.nearby_point or LOCATION_COORDINATES[filters.nearby_location]
             position = {
                 "origin": "origin_position", "destination": "destination_position",
                 "current": "current_position",
@@ -429,7 +568,9 @@ CROSS JOIN query_vector"""
 SELECT
 {_SHIPMENT_COLUMNS},
     {similarity} AS similarity,
-    {remaining_distance} AS remaining_distance_km
+    {remaining_distance} AS remaining_distance_km,
+    {center_distance} AS distance_to_center_km,
+    {hybrid_score} AS hybrid_score
 FROM horizon_ship.shipments AS s
 {vector_join}
 WHERE {' AND '.join(conditions)}
@@ -445,6 +586,20 @@ LIMIT %s;
                 "db_query", "배송 조회 SQL을 실행하고 있습니다.",
                 sql=statement, parameters=visible_parameters,
             )
+            if self._settings.capture_query_plan:
+                try:
+                    async with connection.transaction():
+                        plan_cursor = await connection.execute(
+                            "EXPLAIN (FORMAT JSON, COSTS TRUE, VERBOSE FALSE) " + statement, parameters,
+                        )
+                        plan_row = await plan_cursor.fetchone()
+                        plan = sanitize_plan(plan_row["QUERY PLAN"][0]["Plan"])
+                    report_progress(
+                        "query_plan", "배송 조회의 예상 실행 계획입니다.",
+                        plan=plan, plan_kind="estimated",
+                    )
+                except errors.Error:
+                    report_progress("query_plan_unavailable", "예상 실행 계획을 조회하지 못했습니다.")
             query_started = monotonic()
             cursor = await connection.execute(statement, parameters)
             rows = await cursor.fetchall()
@@ -667,6 +822,10 @@ SELECT
     (
         SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'azure_ai'
     ) AS azure_ai_version,
+    (
+        SELECT reloptions FROM pg_catalog.pg_class
+        WHERE oid = to_regclass('horizon_ship.shipment_embeddings_diskann_idx')
+    ) AS index_options,
     count(*) AS shipment_count,
     count(embedding.embedding) AS azure_embedding_count
 FROM horizon_ship.shipments AS shipment
@@ -683,13 +842,28 @@ LEFT JOIN horizon_ship.shipment_embeddings AS embedding
             postgis_version=row["postgis_version"],
             vector_version=row["vector_version"],
             diskann_version=row["diskann_version"],
+            diskann_spherical_quantization=(
+                "spherical_quantized=true" in (row.get("index_options") or [])
+            ),
+            diskann_sq_bits=next((
+                int(option.split("=", 1)[1]) for option in row.get("index_options") or []
+                if option.startswith("sq_bits=")
+            ), None),
+            diskann_sq_training_samples=next((
+                int(option.split("=", 1)[1]) for option in row.get("index_options") or []
+                if option.startswith("sq_training_samples=")
+            ), None),
             azure_ai_version=row["azure_ai_version"],
             shipment_count=int(row["shipment_count"]),
             azure_embedding_count=int(row["azure_embedding_count"]),
             embedding_mode="azure_openai",
             embedding_model_alias=self._model_alias,
+            chat_provider=self._settings.chat_provider,
+            embedding_provider=self._settings.embedding_provider,
+            chat_model=self.chat_model_name if self._settings.chat_provider == "horizondb" else self._settings.azure_openai_deployment,
+            chat_model_alias=self._settings.chat_model_alias if self._settings.chat_provider == "horizondb" else None,
             detail=(
-                "Query embeddings are generated by the backend; shipment embeddings "
+                f"Query embeddings provider: {self._settings.embedding_provider}; shipment embeddings "
                 "are maintained by the HorizonDB azure_ai pipeline."
             ),
         )

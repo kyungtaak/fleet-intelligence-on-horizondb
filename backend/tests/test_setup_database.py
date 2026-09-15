@@ -23,6 +23,7 @@ from app.setup_database import (
     PIPELINE_SINK_ACTION,
     PRIMARY_INDEX_SQL,
     backfill_embeddings,
+    configure_chat_model,
     configure_embedding_pipeline,
     configure_embeddings,
     configure_pipeline_model,
@@ -141,6 +142,24 @@ def test_pipeline_model_registration_requires_subscription_key(
     settings = live_settings.model_copy(update={"azure_openai_key": None})
     with pytest.raises(RuntimeError, match="AZURE_OPENAI_KEY"):
         configure_pipeline_model(MagicMock(), settings)
+
+
+def test_chat_alias_registration_and_key_rotation(live_settings):
+    connection = MagicMock()
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchone.return_value = None
+    configure_chat_model(connection, live_settings)
+    statement, parameters = cursor.execute.call_args.args
+    assert "model_registry.model_add" in statement
+    assert parameters[0] == live_settings.chat_model_alias
+    assert parameters[2:4] == (live_settings.azure_openai_deployment,) * 2
+    assert live_settings.azure_openai_key not in statement
+    cursor.fetchone.return_value = parameters[:-1]
+    configure_chat_model(connection, live_settings)
+    assert "model_key_update" in cursor.execute.call_args.args[0]
+    cursor.fetchone.return_value = (live_settings.chat_model_alias, "https://different.example/", *parameters[2:-1])
+    with pytest.raises(RuntimeError, match="different nonsecret metadata"):
+        configure_chat_model(connection, live_settings)
 
 
 def test_pipeline_creation_uses_incremental_job_source(live_settings: Settings) -> None:
@@ -318,6 +337,21 @@ def test_backfill_rejects_partial_response_before_writing(live_settings: Setting
         with pytest.raises(ValueError, match="requested inputs"):
             backfill_embeddings(connection, live_settings)
     cursor.executemany.assert_not_called()
+
+
+def test_database_backfill_keeps_input_and_does_not_use_sdk(live_settings):
+    connection = MagicMock()
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchall.return_value = [("shipment-id", "unchanged embedding input")]
+    cursor.fetchone.return_value = (json.dumps([0.1] * 1536),)
+    settings = live_settings.model_copy(update={"embedding_provider": "horizondb"})
+    with patch("app.setup_database.embedding_client") as sdk:
+        assert backfill_embeddings(connection, settings) == 1
+    sdk.assert_not_called()
+    model_calls = [call for call in cursor.execute.call_args_list if "create_embeddings" in call.args[0]]
+    assert len(model_calls) == 1
+    assert model_calls[0].args[1] == (settings.embedding_model_alias, "unchanged embedding input")
+    assert cursor.executemany.call_args.args[1][0][0] == "unchanged embedding input"
 
 
 @pytest.mark.parametrize("configuration_changed,force,cleared", [

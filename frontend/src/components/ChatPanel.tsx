@@ -17,9 +17,11 @@ import { SearchTrace } from './SearchTrace'
 
 const SUGGESTIONS = [
   '지연된 배송을 찾아주세요',
-  '아시아권이 출발지인 배송은?',
   '아시아에서 출발한 의료용품을 찾아주세요',
   '부산 반경 100km 이내에서 출발한 배송을 찾아주세요',
+  '2026년 9월 1일부터 30일까지 도착 예정인 지연 배송을 찾아주세요',
+  '싱가포르 반경 5,000km 안의 반도체 관련 배송을 의미 유사도와 현재 위치 거리로 함께 정렬해 주세요',
+  '목적지에 가장 가까운 배송 2개를 찾아주세요',
 ]
 
 const SEARCH_MODE_LABELS: Record<SearchResponse['search_mode'], string> = {
@@ -44,6 +46,7 @@ interface ChatMessage {
   text: string
   shipments?: Shipment[]
   chatModel?: string
+  chatProvider?: SearchResponse['chat_provider']
   searchMode?: SearchResponse['search_mode']
   hasMore?: boolean
   filters?: SearchResponse['applied_filters']
@@ -54,6 +57,7 @@ interface ChatMessage {
 }
 
 interface ChatPanelProps {
+  externalBusy: boolean
   onSearch: (query: string, onProgress: (event: SearchProgress) => void, signal: AbortSignal) => Promise<SearchResponse>
   selectedNumber: string | null
   onSelect: (shipment: Shipment) => void
@@ -68,7 +72,7 @@ const initialMessage: ChatMessage = {
   text: '안녕하세요. 어떤 배송을 확인해 드릴까요?',
 }
 
-export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShowAll, queryRequest }: ChatPanelProps) {
+export function ChatPanel({ onSearch, externalBusy, selectedNumber, onSelect, onLocate, onShowAll, queryRequest }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([initialMessage])
   const [input, setInput] = useState('')
   const [searching, setSearching] = useState(false)
@@ -86,10 +90,14 @@ export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShow
   useEffect(() => () => activeRequest.current?.abort(), [])
 
   useEffect(() => {
-    if (!queryRequest || queryRequest.id === lastQueryRequest.current) return
+    if (externalBusy) activeRequest.current?.abort()
+  }, [externalBusy])
+
+  useEffect(() => {
+    if (searching || externalBusy || !queryRequest || queryRequest.id === lastQueryRequest.current) return
     lastQueryRequest.current = queryRequest.id
     submitExternalQuery(queryRequest.query)
-  }, [queryRequest])
+  }, [queryRequest, searching, externalBusy])
 
   useEffect(() => {
     messageEnd.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
@@ -97,7 +105,7 @@ export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShow
 
   async function submitQuery(query: string, started: number) {
     const normalized = query.trim()
-    if (normalized.length < 2 || activeRequest.current) return
+    if (normalized.length < 2 || activeRequest.current || externalBusy) return
     const controller = new AbortController()
     activeRequest.current = controller
     const trace: SearchProgress[] = []
@@ -127,6 +135,7 @@ export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShow
           text: result.answer,
           shipments: result.shipments,
           chatModel: result.chat_model,
+          chatProvider: result.chat_provider,
           searchMode: result.search_mode,
           hasMore: result.has_more,
           filters: result.applied_filters,
@@ -174,8 +183,8 @@ export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShow
     <aside className="chat-panel workspace-panel" aria-label="AI 배송 도우미" lang="ko">
       <div className="panel-heading chat-heading">
         <div>
-          <span className="eyebrow">배송 검색</span>
-          <h2>AI 배송 도우미</h2>
+          <span className="eyebrow">Agent with Tools</span>
+          <h2>Shipment assistant</h2>
         </div>
         <button
           className="icon-button"
@@ -238,6 +247,8 @@ export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShow
                         message.filters.destination_name && `도착지: ${message.filters.destination_name}`,
                         message.filters.nearby_location && `${{ origin: '출발', destination: '도착', current: '현재' }[message.filters.position_field]} 위치: ${message.filters.nearby_location} 반경 ${message.filters.radius_km}km`,
                         message.filters.cargo_query && `화물 검색어: ${message.filters.cargo_query}`,
+                        (message.filters.eta_start || message.filters.eta_end) && `ETA: ${message.filters.eta_start ?? '시작 제한 없음'} ~ ${message.filters.eta_end ?? '종료 제한 없음'} (양 끝 포함)`,
+                        message.filters.sort_by === 'semantic_spatial' && '정렬: 의미 72% + 기준점 근접도 28%',
                         message.filters.sort_by === 'destination_distance' && '정렬: 현재 위치에서 각 목적지까지 가까운 순',
                         message.filters.sort_by === 'destination_distance' && !message.filters.status && '배송 완료 제외',
                         message.filters.result_limit && `요청: ${message.filters.result_limit}건`,
@@ -255,7 +266,7 @@ export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShow
                     <button
                       type="button"
                       key={suggestion}
-                      disabled={searching}
+                      disabled={searching || externalBusy}
                       onClick={(event) => void submitQuery(suggestion, event.timeStamp)}
                     >
                       {suggestion}
@@ -292,10 +303,21 @@ export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShow
                           <br />지표면 최단거리
                         </p>
                       ) : null}
+                      {shipment.distance_to_center_km != null ? (
+                        <p className="chat-result-distance">
+                          기준점까지 {shipment.distance_to_center_km.toLocaleString('ko-KR', { maximumFractionDigits: 1 })} km
+                          <br />지표면 최단거리
+                        </p>
+                      ) : null}
+                      {(message.filters?.eta_start || message.filters?.eta_end) && shipment.eta ? (
+                        <p>ETA {shipment.eta}</p>
+                      ) : null}
                       </button>
                       <div className="chat-result-footer">
                         <span>
-                          {shipment.similarity !== null
+                          {shipment.hybrid_score != null
+                            ? `가중 점수 ${shipment.hybrid_score.toFixed(3)}`
+                            : shipment.similarity !== null
                             ? `유사도 ${Math.round(shipment.similarity * 100)}%`
                             : '조건 일치'}
                         </span>
@@ -307,7 +329,7 @@ export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShow
                     </article>
                   ))}
                   <span className="query-engine">
-                    {message.chatModel} · {message.searchMode ? SEARCH_MODE_LABELS[message.searchMode] : '배송 검색'}
+                    {message.chatProvider === 'horizondb' ? 'HorizonDB 모델 호출' : '직접 모델 호출'} · {message.chatModel} · {message.searchMode ? SEARCH_MODE_LABELS[message.searchMode] : '배송 검색'}
                   </span>
                 </div>
               ) : null}
@@ -342,7 +364,7 @@ export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShow
             }}
             placeholder="배송에 관해 질문해 주세요"
             maxLength={300}
-            disabled={searching}
+            disabled={searching || externalBusy}
           />
         </label>
         {searching ? (
@@ -353,7 +375,7 @@ export function ChatPanel({ onSearch, selectedNumber, onSelect, onLocate, onShow
           type="submit"
           aria-label="메시지 보내기"
           title="보내기"
-          disabled={input.trim().length < 2 || searching}
+          disabled={input.trim().length < 2 || searching || externalBusy}
         >
           <Send size={17} />
         </button>}
