@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+name: horizon-ship
+description: HorizonShip Container Apps deployment using an existing or new HorizonDB cluster
+requiredVersions:
+  azd: ">= 1.15.0"
+
+hooks:
+  preup:
+    shell: pwsh
+    interactive: true
+    continueOnError: false
+    run: ./azd-hooks/preup.ps1
+  preprovision:
+    shell: pwsh
+    interactive: true
+    continueOnError: false
+    run: ./azd-hooks/preprovision.ps1
+  postprovision:
+    shell: pwsh
+    interactive: false
+    continueOnError: false
+    run: ./azd-hooks/postprovision.ps1
+  postdeploy:
+    shell: pwsh
+    interactive: false
+    continueOnError: false
+    run: ./azd-hooks/postdeploy.ps1
+  predown:
+    shell: pwsh
+    interactive: false
+    continueOnError: false
+    run: ./azd-hooks/predown.ps1
+
+infra:
+  provider: bicep
+  path: ./infra
+  module: azd-main
+
+services:
+  backend:
+    project: ./backend
+    language: py
+    host: containerapp
+    resourceName: ${SERVICE_BACKEND_NAME}
+    docker:
+      path: Dockerfile
+      context: ..
+      platform: linux/amd64
+      registry: ${AZURE_CONTAINER_REGISTRY_ENDPOINT}
+      remoteBuild: true
+  frontend:
+    project: ./frontend
+    language: ts
+    host: containerapp
+    resourceName: ${SERVICE_FRONTEND_NAME}
+    uses:
+      - backend
+    docker:
+      path: Dockerfile
+      context: .
+      platform: linux/amd64
+      registry: ${AZURE_CONTAINER_REGISTRY_ENDPOINT}
+      remoteBuild: true

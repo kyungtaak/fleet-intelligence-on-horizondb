@@ -1,0 +1,63 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "${AZURE_ENV_NAME}"
+    },
+    "location": {
+      "value": "${AZURE_LOCATION=westus3}"
+    },
+    "namePrefix": {
+      "value": "${AZURE_NAME_PREFIX=horizonship}"
+    },
+    "horizonDbMode": {
+      "value": "${HORIZONDB_MODE=existing}"
+    },
+    "horizonDbCreateMode": {
+      "value": "${HORIZONDB_CREATE_MODE=Create}"
+    },
+    "existingHorizonDbResourceGroup": {
+      "value": "${HORIZONDB_RESOURCE_GROUP=}"
+    },
+    "existingHorizonDbClusterName": {
+      "value": "${HORIZONDB_CLUSTER_NAME=}"
+    },
+    "administratorLogin": {
+      "value": "${AZURE_PG_USER=horizonadmin}"
+    },
+    "administratorPassword": {
+      "value": "${AZURE_PG_PASSWORD}"
+    },
+    "databaseName": {
+      "value": "${AZURE_PG_NAME=postgres}"
+    },
+    "openAiEndpoint": {
+      "value": "${AZURE_OPENAI_ENDPOINT}"
+    },
+    "openAiKey": {
+      "value": "${AZURE_OPENAI_KEY}"
+    },
+    "chatDeployment": {
+      "value": "${AZURE_OPENAI_DEPLOYMENT=gpt-5.4}"
+    },
+    "embeddingDeployment": {
+      "value": "${AZURE_EMBED_DEPLOYMENT=text-embedding-3-small}"
+    },
+    "chatProvider": {
+      "value": "${CHAT_PROVIDER=azure_openai}"
+    },
+    "embeddingProvider": {
+      "value": "${EMBEDDING_PROVIDER=azure_openai}"
+    },
+    "runDatabaseSetup": {
+      "value": "${RUN_DATABASE_SETUP=false}"
+    },
+    "allowAzureServicesToHorizonDb": {
+      "value": "${ALLOW_AZURE_SERVICES_TO_HORIZONDB=true}"
+    },
+    "captureQueryPlan": {
+      "value": "${CAPTURE_QUERY_PLAN=true}"
+    }
+  }
+}

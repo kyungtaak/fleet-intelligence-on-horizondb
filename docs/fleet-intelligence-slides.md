@@ -104,25 +104,28 @@ boundary  geometry(MultiPolygon, 4326)
 | --- | --- |
 | 상태·기간 | `delayed` · 2026-09-01~30, 양 끝 포함 |
 | 출발 권역 | `Asia` · 출발 좌표를 경계와 비교 |
-| 화물 의미 | `lithium battery` → 검색어 벡터 · 유사도순 |
+| 화물 의미 유사도 정렬 | `lithium battery` → 임베딩 모델 → `vector(1536)`. 생성한 벡터를 첫 `%s`에 바인딩 · cosine 유사도순 |
 
-```sql
-s.status = %s
-AND s.eta >= %s::date
-AND s.eta <= %s::date
-AND EXISTS (
-	SELECT 1
-	FROM horizon_ship.region_boundaries AS region
-	WHERE region.name = %s
-		AND public.ST_Covers(
-			region.boundary, s.origin_position)
-)
+```sql conditions=3,3,0,3,0,3,3,1,1,2,2,2,2,3
+WITH query_vector AS (
+	SELECT %s::public.vector(1536) AS embedding)
+SELECT s.shipment_number,
+	1 - (se.embedding <=> query_vector.embedding) AS similarity
+FROM horizon_ship.shipments AS s
+JOIN horizon_ship.shipment_embeddings AS se ON se.shipment_id = s.id
+CROSS JOIN query_vector
+WHERE s.status = %s
+	AND s.eta >= %s::date AND s.eta <= %s::date
+	AND EXISTS (
+		SELECT 1 FROM horizon_ship.region_boundaries AS region
+		WHERE region.name = %s
+			AND public.ST_Covers(region.boundary, s.origin_position))
 ORDER BY se.embedding <=> query_vector.embedding
 ```
 
 **확인 결과 · 후보 3건 중 SHIP-0011이 첫 번째**였습니다. 리튬 배터리 화물이며 유사도는 0.5769입니다.
 
-2026-09-15 확인 기준입니다. 나머지 두 후보는 전기차·의류입니다. 의미 유사도는 품목의 정확한 일치 조건이 아닙니다.
+2026-09-15 확인 기준입니다. 최소 유사도 필터가 없어 전기차·의류도 후보에 포함됩니다.
 
 ## 반경 안에서 의미와 거리로 정렬하기
 
@@ -134,7 +137,7 @@ ORDER BY se.embedding <=> query_vector.embedding
 | 현재 위치 반경 | `Singapore` · 5,000km → 5,000,000m |
 | 복합 정렬 | `semantic_spatial` · 의미 72% + 근접도 28% |
 
-```sql
+```sql conditions=1,1,0,2,2,2,2,0,3,3
 1 - (se.embedding <=> query_vector.embedding)
 	AS similarity
 
@@ -166,7 +169,7 @@ hybrid_score = 0.72 × 의미 유사도
 | 거리 기준 | 각 배송의 현재 위치 → 자기 목적지 |
 | 정렬·건수 | `destination_distance` · 거리 오름차순, 상위 2건 |
 
-```sql
+```sql conditions=2,2,2,2,0,1,1,0,3,3,3
 public.ST_Distance(
 	s.current_position::public.geography,
 	s.destination_position::public.geography
@@ -288,6 +291,8 @@ job에는 배송별 한 행을 upsert하고 버전을 증가시킵니다. pipeli
 
 **고객의 대표 질문과 샘플 데이터로 시작해, 필요한 조건이 반영되고 원하는 결과가 나오는지 확인합니다.**
 
+## end
+
 ## 검증 범위와 운영 적용 전 확인
 
 | 확인한 내용 | 그대로 일반화하지 않을 내용 |
@@ -333,14 +338,3 @@ job에는 배송별 한 행을 upsert하고 버전을 증가시킵니다. pipeli
 | Ranking | 기본 관련성순 또는 의미 72%·근접도 28%순입니다. 복합 정렬에는 검색어와 기준점이 필요합니다. |
 
 버튼 또는 Enter로 검색합니다. 입력 변경만으로 다시 조회하지 않으며 `Clear`로 조건과 결과를 초기화합니다.
-
-## 현재 저장소의 실행과 배포 범위
-
-```powershell
-uv run --directory backend python -m app.server
-npm --prefix frontend run dev
-```
-
-Backend와 frontend는 별도 터미널에서 실행합니다. 환경·모델·DB 준비는 프로젝트 README를 따릅니다.
-
-인프라는 PowerShell·Bicep으로 HorizonDB와 선택적 Foundry를 준비합니다. `Check` → `WhatIf` → 승인 후 `Deploy` 순서입니다. 원본의 `azd up`·Container Apps 배포는 이 저장소에 포함하지 않았습니다. 모델 별칭만 준비할 때는 전체 DB setup 대신 `--models-only`를 사용합니다.

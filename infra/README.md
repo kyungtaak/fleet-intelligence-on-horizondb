@@ -14,6 +14,8 @@ HorizonDB 기본 배포와 Foundry 선택 배포를 별도 스크립트로 제�
 | [subscription.bicep](subscription.bicep), [main.bicep](main.bicep) | DB용 리소스 그룹, HorizonDB, parameter group, DB 방화벽 |
 | [foundry-subscription.bicep](foundry-subscription.bicep), [foundry.bicep](foundry.bicep) | Foundry용 리소스 그룹, Entra ID 전용 Foundry, 두 모델, 선택적 백엔드 RBAC |
 | [foundry-project.bicep](foundry-project.bicep) | 기존 Foundry 아래 project만 별도 생성 |
+| [../azure.yaml](../azure.yaml), [azd-main.bicep](azd-main.bicep) | 기존 또는 신규 HorizonDB를 선택하는 Container Apps 배포 |
+| [../azd-hooks/configure.ps1](../azd-hooks/configure.ps1) | azd 환경과 비밀 값 대화형 설정 |
 | [main.bicepparam](main.bicepparam) | 실행 프로세스의 환경 변수에서 배포 설정과 비밀번호 전달 |
 | [foundry.bicepparam](foundry.bicepparam) | Foundry 배포 설정만 전달, DB 비밀번호 불필요 |
 | [Test-Deployment.ps1](Test-Deployment.ps1) | 실제 Azure 호출 없이 제어 흐름을 검사하는 로컬 테스트 |
@@ -32,6 +34,92 @@ DB 접속용 비밀번호 인증은 유지합니다. 채팅과 검색어 임베�
 Foundry 배포에는 project를 포함하지 않습니다. 포털에서 모델을 확인하고 테스트할 때는
 아래 project 전용 템플릿으로 추가합니다. 호스팅된 Agent Service와 웹 애플리케이션 호스팅은 포함하지 않습니다.
 
+## Azure Container Apps 배포
+
+루트의 `azure.yaml`은 앱 호스팅과 선택적 HorizonDB 생성을 한 `azd up` 흐름으로 묶습니다.
+Foundry와 모델 deployment는 이 흐름에서 생성하거나 변경하지 않습니다. 기존 Azure OpenAI endpoint,
+subscription key, `gpt-5.4`, `text-embedding-3-small` deployment가 먼저 준비되어 있어야 합니다.
+
+배포되는 앱 리소스는 ACR Basic, Container Apps Environment, frontend와 backend Container App,
+각 앱의 User Assigned Managed Identity와 ACR Pull 역할입니다. frontend만 public ingress를 사용합니다.
+Nginx가 같은 origin의 `/api` 요청을 내부 backend ingress로 전달합니다.
+
+### 기존 HorizonDB 사용
+
+현재 배포된 HorizonDB를 그대로 사용할 때는 저장소 루트에서 다음 설정 스크립트를 실행합니다.
+스크립트가 DB 비밀번호와 Azure OpenAI subscription key를 화면에 표시하지 않는 입력으로 받습니다.
+`OpenAiEndpoint`에는 현재 사용 중인 리소스 endpoint를 입력합니다.
+
+```powershell
+./azd-hooks/configure.ps1 `
+	-EnvironmentName demo `
+	-SubscriptionId 'b214e225-c96c-489e-a778-a1f25bd40cdb' `
+	-HorizonDbMode existing `
+	-ResourceGroupName 'rg-horizonship-app-demo-wus3' `
+	-ExistingHorizonDbResourceGroup 'rg-horizonship-dev-wus3' `
+	-ExistingHorizonDbClusterName 'horizonship-db-6prmjv3zxbvfs' `
+	-OpenAiEndpoint 'https://<foundry-resource>.openai.azure.com/'
+
+azd up
+```
+
+`azd up`을 실행할 때 `AZURE_PG_PASSWORD` 또는 `AZURE_OPENAI_KEY`가 azd 환경에 없으면
+`preup` hook이 infrastructure parameter를 읽기 전에 화면에 표시하지 않는 방식으로 입력받아 저장합니다.
+따라서 Bicep parameter prompt에서 입력한 값이 `preprovision` hook으로 전달되지 않는 문제를 피할 수 있습니다.
+`azd provision`을 단독으로 실행할 때는 `preup`이 실행되지 않으므로 먼저 설정 스크립트를 실행해야 합니다.
+
+`existing`은 기본적으로 `RUN_DATABASE_SETUP=false`입니다. 기존 schema와 데이터, model registry,
+pipeline을 변경하지 않습니다. DB가 아직 초기화되지 않았을 때만 설정 명령에 `-RunDatabaseSetup`을 추가합니다.
+
+### 새 HorizonDB 생성
+
+새 환경에서는 `create`를 지정합니다. DB 관리자 비밀번호는 새 cluster와 backend가 함께 사용합니다.
+
+```powershell
+./azd-hooks/configure.ps1 `
+	-EnvironmentName demo-new `
+	-SubscriptionId 'b214e225-c96c-489e-a778-a1f25bd40cdb' `
+	-HorizonDbMode create `
+	-ResourceGroupName 'rg-horizonship-demo-new-wus3' `
+	-OpenAiEndpoint 'https://<foundry-resource>.openai.azure.com/'
+
+azd up
+```
+
+`create`는 새 HorizonDB와 parameter group을 만든 뒤 parameter group이 `InSync`인지 확인합니다.
+최초 backend revision이 schema, 샘플 24건, 임베딩, DiskANN index와 변경 감지 pipeline을 준비합니다.
+health 검사가 성공하면 setup 플래그를 끄는 새 revision을 만들어 이후 재시작에서는 setup을 반복하지 않습니다.
+같은 azd 환경으로 다시 `azd up`을 실행하면 cluster가 있음을 확인하고 `Update` 모드로 전환합니다.
+
+### 방화벽과 종료
+
+Container Apps에서 public HorizonDB endpoint에 연결할 수 있도록 기본값은 Azure 서비스 허용 규칙
+`0.0.0.0`을 추가합니다. Azure의 임의 인터넷 주소를 허용한다는 뜻은 아니지만 구독의 모든 Azure
+서비스로 제한되는 규칙도 아닙니다. 단기 데모에만 사용하고 운영 환경에서는 VNet 또는 고정 outbound IP로 바꿉니다.
+이미 별도 네트워크 경로를 구성했다면 설정 명령에 `-DoNotAllowAzureServices`를 추가합니다.
+
+```powershell
+azd down --purge
+```
+
+`existing`에서는 종료 전에 azd가 추가한 임시 방화벽 규칙을 제거하고 앱 리소스 그룹을 삭제합니다.
+기존 HorizonDB와 데이터는 삭제하지 않습니다. `create`에서는 HorizonDB가 앱과 같은 리소스 그룹에 있으므로
+`azd down --purge`가 DB도 함께 삭제합니다. 중간 실패 후 정리할 때는 방화벽 규칙과 남은 리소스를 Portal에서 확인합니다.
+기존 DB를 보호하기 위해 `existing` 모드에서는 앱 리소스 그룹과 HorizonDB 리소스 그룹을 같게 설정할 수 없습니다.
+
+azd 환경 값은 로컬 `.azure` 폴더에 저장되고 Git에서 제외됩니다. 비밀번호와 key를 채팅, 로그,
+명령 예제에 넣지 마세요. 데모가 끝나면 Azure 리소스를 내린 뒤 `azd env remove demo`로 로컬 환경도 제거합니다.
+
+### 배포 후 검사
+
+`postdeploy` hook은 public frontend의 `/api/health`를 호출해 HorizonDB 연결, Agent Framework,
+배송·임베딩 개수와 SQ4 DiskANN 설정을 확인합니다. 성공하면 frontend URL을 출력합니다.
+Docker Desktop 없이도 ACR remote build를 사용하므로 로컬 Docker daemon은 필수가 아닙니다.
+
+배포 환경은 `CAPTURE_QUERY_PLAN=true`를 기본으로 사용합니다. 검색할 때 backend가
+`EXPLAIN (FORMAT JSON, COSTS TRUE)`로 예상 실행 계획을 수집하며 화면의 실행 내역에서 확인할 수 있습니다.
+운영 환경에서 추가 DB 호출을 원하지 않으면 `azd env set CAPTURE_QUERY_PLAN false` 후 다시 배포합니다.
+
 2026-09-10 구독 조회에서 West US 3의 두 모델과 quota를 확인했습니다.
 West US 2에서는 대상 모델이 목록에 없어 이 스크립트는 West US 3만 허용합니다.
 DB 스크립트는 HorizonDB API 지원만 검사합니다. Foundry 스크립트는 모델의 고정 버전, SKU와 남은 quota를 검사합니다.
@@ -39,8 +127,9 @@ DB 스크립트는 HorizonDB API 지원만 검사합니다. Foundry 스크립트
 
 ## 보안과 비용
 
-HorizonDB의 공용 endpoint는 활성화하지만, DB 방화벽은 자동 조회하거나 직접 지정한 공인 IPv4 하나만 허용합니다.
-`0.0.0.0` 규칙이나 모든 Azure 서비스 허용 규칙은 생성하지 않습니다.
+기존 `deploy.ps1` 흐름은 HorizonDB의 공용 endpoint를 활성화하지만, DB 방화벽에는 자동 조회하거나 직접
+지정한 공인 IPv4 하나만 허용합니다. 이 흐름은 `0.0.0.0` 규칙이나 모든 Azure 서비스 허용 규칙을 생성하지 않습니다.
+Container Apps용 `azd` 흐름의 임시 Azure 서비스 허용 규칙은 앞의 별도 안내를 따릅니다.
 `WhatIf`와 `Deploy`에서 `-ClientIpAddress`를 생략하면 `https://api4.ipify.org`로 공인 IPv4를 조회합니다.
 15초 제한으로 조회하고, 실패하거나 올바른 공인 IPv4가 아니면 중단합니다. `Check`와 `Register`는 IP를 조회하지 않습니다.
 프록시나 VPN 환경에서는 HTTP 조회 IP와 PostgreSQL 접속 IP가 다를 수 있습니다.

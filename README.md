@@ -397,6 +397,24 @@ optimizer가 만든 join처럼 직접 대응하지 않는 노드는 강조하지
 | [database/schema.sql](database/schema.sql) | HorizonDB 확장 기능과 관계형·벡터 스키마 |
 | [frontend/src](frontend/src) | React 운영 화면, Leaflet 지도, 어시스턴트 채팅 |
 | [frontend/src/components/ChatPanel.tsx](frontend/src/components/ChatPanel.tsx) | 한국어 답변, 실행 내역, 검색 조건·결과 카드 표시 |
+| [azure.yaml](azure.yaml), [infra/azd-main.bicep](infra/azd-main.bicep) | 기존/신규 HorizonDB를 선택하는 Container Apps 배포 |
+| [azd-hooks](azd-hooks) | azd 환경 설정, 배포 전 검사, DB 설정과 배포 후 검사 |
+
+## Azure Container Apps 배포
+
+`azd up`으로 ACR, Container Apps Environment, frontend와 backend Container App을 배포할 수 있습니다.
+모델 리소스와 모델 deployment는 만들지 않으며 기존 Azure OpenAI endpoint와 deployment를 사용합니다.
+
+HorizonDB는 두 모드를 지원합니다.
+
+- `create`: 같은 azd 리소스 그룹에 새 HorizonDB를 만들고 최초 앱 시작 때 schema, 샘플 데이터,
+  임베딩과 DiskANN index를 준비합니다. 같은 azd 환경에서 다시 실행하면 기존 cluster를 갱신합니다.
+- `existing`: 지정한 HorizonDB를 읽고 앱 연결 정보만 구성합니다. 기존 DB의 parameter group과
+  데이터를 변경하지 않으며 `-RunDatabaseSetup`을 명시했을 때만 DB 초기 설정을 실행합니다.
+
+현재 배포값과 명령은 [Container Apps 배포 안내](infra/README.md#azure-container-apps-배포)를 확인합니다.
+frontend만 인터넷에 공개되고 backend ingress는 같은 Container Apps Environment 내부로 제한됩니다.
+인증 없는 데모 앱이므로 운영 서비스로 공개하기 전에는 사용자 인증과 API 권한 검사를 추가해야 합니다.
 
 ## 로컬 실행
 

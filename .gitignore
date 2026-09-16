@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.azure/
 backend/.env
 backend/.env.*
 !backend/.env.example

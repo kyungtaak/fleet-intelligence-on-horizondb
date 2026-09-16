@@ -25,8 +25,8 @@ export function createSlidesDocument({ source, tree, headings, render, text, esc
     '질문에서 검색 결과와 답변까지': ['agent', 'Microsoft Agent Framework'],
     '배송 변경에 따라 임베딩 갱신하기': ['pipeline', 'Data change → embedding update'],
     '고객 데이터로 적용하는 방법': ['adoption', 'Apply to your business'],
+    'end': ['ending', ''],
     '예상 계획과 측정 시간을 구분': ['table', '참고 2 · Query diagnostics'],
-    '현재 저장소의 실행과 배포 범위': ['deployment', '참고 5 · Setup and deployment'],
     '검증 범위와 운영 적용 전 확인': ['table', '참고 1 · Validation and operations'],
     'HorizonDB에 저장하는 데이터': ['table', '참고 3 · Data storage'],
     'Search Workbench에서 직접 지정하는 조건': ['table', '참고 4 · Search controls'],
@@ -56,6 +56,9 @@ export function createSlidesDocument({ source, tree, headings, render, text, esc
     if (kind === 'title') {
       className = 'title dark'
       body = `<div class="title-content"><p class="kicker">${caption}</p><h1>${title}</h1><div class="lead">${html(paragraphs.slice(0, 2))}</div><div class="title-tags">${text(paragraphs[2]).split(' · ').map(tag => `<span>${escape(tag)}</span>`).join('')}</div></div>`
+    } else if (kind === 'ending') {
+      className = 'ending-slide dark'
+      body = `<h1>${title}</h1>`
     } else if (kind === 'purpose') {
       className = 'purpose-slide'
       body = `${header}<div class="purpose-intro">${html([paragraphs[0]])}</div><div class="purpose-system"><div class="purpose-database"><h2>Azure HorizonDB</h2><div class="purpose-foundation">${html([paragraphs[1]])}</div><div class="purpose-data">${rows.map(row => `<div><h3>${escape(text(row.children[0]))}</h3>${html([row.children[1]])}<p class="purpose-capability">${escape(text(row.children[2]))}</p></div>`).join('')}</div><div class="purpose-pipeline">${html([paragraphs[2]])}</div></div><div class="purpose-connection" aria-label="모델 호출과 응답">&#8596;</div><div class="purpose-model"><p class="kicker">외부 모델 서비스</p><h2>Azure AI Foundry</h2>${html([paragraphs[3]])}</div></div><div class="purpose-outcome">${html([paragraphs[4]])}</div>`
@@ -71,13 +74,32 @@ export function createSlidesDocument({ source, tree, headings, render, text, esc
       body = `<div class="screen-header"><h1>${title}</h1><p>${caption}</p></div><div class="screen-layout"><a class="screen-image" href="${escape(image.url)}" target="_blank" rel="noopener" title="원본 이미지 열기"><img src="${escape(image.url)}" alt="${escape(image.alt)}"></a><div class="screen-notes">${paragraphs.map((node, paragraphIndex) => `<div class="screen-note ${paragraphIndex ? 'green' : 'amber'}"><strong>${labels[paragraphIndex]}</strong>${html([node])}</div>`).join('')}</div></div>`
     } else if (kind === 'data') {
       assert.equal(codes.length, 3, 'Search data slide needs three table definitions')
+      const tableDefinitions = codes.map(node => {
+        const [tableName, ...columns] = node.value.split('\n')
+        return `<pre><code class="language-text"><mark class="table-name">${escape(tableName)}</mark>\n${escape(columns.join('\n'))}\n</code></pre>`
+      })
       className = 'data-slide technical-slide'
-      body = `${header}<div class="technical-intro">${html([paragraphs[0]])}</div><div class="data-relations"><div class="data-source"><h3>배송 · 정형 조건과 위치</h3>${html([codes[0]])}</div><div class="data-links"><div><h3>ID JOIN · shipments.id = shipment_id</h3>${html([codes[1], paragraphs[1]])}</div><div><h3>공간 비교 · origin_position ↔ boundary</h3>${html([codes[2], paragraphs[2]])}</div></div></div><div class="technical-note">${html([paragraphs[3]])}</div>`
+      body = `${header}<div class="technical-intro">${html([paragraphs[0]])}</div><div class="data-relations"><div class="data-source"><h3>배송 · 정형 조건과 위치</h3>${tableDefinitions[0]}</div><div class="data-links"><div><h3>ID JOIN · shipments.id = shipment_id</h3>${tableDefinitions[1]}${html([paragraphs[1]])}</div><div><h3>공간 비교 · origin_position ↔ boundary</h3>${tableDefinitions[2]}${html([paragraphs[2]])}</div></div></div><div class="technical-note">${html([paragraphs[3]])}</div>`
     } else if (kind === 'query') {
       assert.equal(rows.length, 3, 'Query slide needs three condition groups')
       assert.equal(paragraphs.length, 3, 'Query slide needs question, result and caveat')
-      className = 'query-slide technical-slide'
-      body = `${header}<div class="query-question">${html([paragraphs[0]])}</div><div class="query-body"><div class="query-conditions"><h3>적용 조건</h3>${rows.map(row => { const label = text(row.children[0]); const category = label.includes('의미') ? 'semantic' : label.includes('상태') ? 'structured' : label.includes('정렬') ? 'ranking' : 'spatial'; return `<div class="condition-${category}"><h4>${escape(label)}</h4>${html([row.children[1]])}</div>` }).join('')}${codes.length > 1 ? `<section class="query-score" aria-label="가중 점수 계산">${html(codes.slice(1))}<p>거리·반경은 km 단위입니다.</p></section>` : ''}</div><div class="query-sql"><h3>핵심 SQL 발췌 <span>전체 실행문 아님 · %s는 바인딩 값</span></h3>${html([code])}</div></div><div class="query-result">${html([paragraphs[1]])}</div><div class="query-caveat">${html([paragraphs[2]])}</div>`
+      const conditionGroups = rows.map(row => {
+        const label = text(row.children[0])
+        const category = label.includes('의미') ? 'semantic' : label.includes('상태') ? 'structured' : label.includes('정렬') ? 'ranking' : 'spatial'
+        return { label, category }
+      })
+      const annotation = code.meta?.match(/^conditions=([0-3](?:,[0-3])*)$/)
+      assert.ok(annotation, `Missing SQL condition annotations: ${text(heading)}`)
+      const conditionNumbers = annotation[1].split(',').map(Number)
+      const sqlLines = code.value.split('\n')
+      assert.equal(conditionNumbers.length, sqlLines.length, `SQL condition annotations must match each line: ${text(heading)}`)
+      const querySql = sqlLines.map((line, lineIndex) => {
+        const conditionNumber = conditionNumbers[lineIndex]
+        const group = conditionGroups[conditionNumber - 1]
+        return `<span class="sql-line${group ? ` sql-${group.category}` : ''}" data-condition="${conditionNumber}"${group ? ` title="${escape(group.label)}"` : ''}>${escape(line)}</span>`
+      }).join('\n')
+      className = `query-slide technical-slide${code.value.startsWith('WITH query_vector AS') ? ' query-vector-slide' : ''}${code.value.startsWith('public.ST_Distance(') ? ' query-destination-slide' : ''}`
+      body = `${header}<div class="query-question">${html([paragraphs[0]])}</div><div class="query-body"><div class="query-conditions"><h3>적용 조건</h3>${rows.map((row, rowIndex) => { const { label, category } = conditionGroups[rowIndex]; return `<div class="condition-${category}"><h4>${escape(label)}</h4>${html([row.children[1]])}</div>` }).join('')}${codes.length > 1 ? `<section class="query-score" aria-label="가중 점수 계산">${html(codes.slice(1))}<p>거리·반경은 km 단위입니다.</p></section>` : ''}</div><div class="query-sql"><h3>핵심 SQL 발췌 <span>전체 실행문 아님 · %s는 바인딩 값</span></h3><pre><code class="language-sql condition-sql">${querySql}\n</code></pre></div></div><div class="query-result">${html([paragraphs[1]])}</div><div class="query-caveat">${html([paragraphs[2]])}</div>`
     } else if (kind === 'models') {
       className = 'models-slide technical-slide'
       body = `${header}<div class="technical-intro">${html([paragraphs[0]])}</div><div class="model-boundaries"><div class="registry-definition"><h3>HorizonDB · 모델 등록</h3>${html([code])}<p>별칭 → 연결 정보<br>모델 가중치를 저장하지 않음</p></div><div class="model-calls"><h3>HorizonDB · 호출 함수</h3>${rows.map(row => `<div>${html([row.children[0], row.children[1]])}</div>`).join('')}</div><div class="model-transport"><span>외부 추론</span><b aria-hidden="true">&#8596;</b><span>호출·응답</span></div><div class="external-models"><p class="kicker">외부 서비스</p><h3>Azure AI Foundry</h3><div><strong>GPT-5.4</strong><p>조건 해석 · 답변 생성</p></div><div><strong>text-embedding-3-small</strong><p>텍스트 → 1,536차원 벡터</p></div></div></div><div class="model-boundary-note">${html([paragraphs[1]])}</div><div class="technical-note">${html([paragraphs[2]])}</div>`
@@ -90,9 +112,6 @@ export function createSlidesDocument({ source, tree, headings, render, text, esc
       const pipelineSql = codes[2].value.split('\n').map(line => line.trim() === "trigger => 'on_change'," ? `<mark class="pipeline-trigger">${escape(line)}</mark>` : escape(line)).join('\n')
       className = 'pipeline-slide technical-slide'
       body = `${header}<div class="technical-intro">${html([paragraphs[0]])}</div><div class="pipeline-flow">${rows.map((row, step) => `<div><span class="pipeline-number">0${step + 1}</span><h3>${escape(text(row.children[0]))}</h3>${html([row.children[1]])}${step === 1 ? '<div class="pipeline-gate">신규·입력 변경 → job<br>변경 없음 → 종료</div>' : ''}</div>`).join('')}</div><div class="pipeline-details"><div class="pipeline-rules"><h3>변경 대상과 검색 시점</h3>${html(codes.slice(0, 2))}<div class="technical-note">${html([paragraphs[1]])}</div></div><div class="pipeline-declaration"><h3>실제 pipeline 선언 <span>%s는 실행 시 바인딩 값</span></h3><pre><code class="language-sql">${pipelineSql}</code></pre></div></div>`
-    } else if (kind === 'deployment') {
-      className = 'deployment-slide'
-      body = `${header}<div class="code-insight-grid"><div class="insight-panel green"><h3>로컬 앱 실행</h3><p>uv + npm / 별도 터미널</p>${html([code])}<div class="supporting-copy">${html([paragraphs[0]])}</div></div><div class="insight-panel amber"><h3>승인 기반 인프라 배포</h3><p>PowerShell + Bicep</p><pre><span class="code-key">Check</span>\n  ↓\n<span class="code-value">WhatIf</span>\n  ↓\n승인 후 <span class="code-call">Deploy</span></pre><div class="supporting-copy">${html(paragraphs.slice(1))}</div></div></div>`
     } else if (kind === 'adoption') {
       assert.equal(rows.length, 3, 'Customer adoption slide needs three adaptation areas')
       assert.equal(paragraphs.length, 2, 'Customer adoption slide needs introduction and closing statement')
@@ -101,7 +120,7 @@ export function createSlidesDocument({ source, tree, headings, render, text, esc
     } else {
       body = `${header}${tableHtml(table)}<div class="architecture-note">${html(paragraphs)}</div>`
     }
-    return `<section class="slide ${className}${index === 0 ? ' active' : ''}" id="slide-${index + 1}" aria-label="${title}"${index ? ' hidden' : ''}>${body}${footer}</section>`
+    return `<section class="slide ${className}${index === 0 ? ' active' : ''}" id="slide-${index + 1}" aria-label="${title}"${index ? ' hidden' : ''}>${body}${kind === 'ending' ? '' : footer}</section>`
   }).join('\n')
 
   const options = headings.map((node, index) => `<option value="${index}">${index + 1}. ${slideDefinitions[text(node)][1].startsWith('참고') ? '[참고] ' : ''}${escape(text(node))}</option>`).join('')
@@ -128,8 +147,13 @@ body{display:block}h1,h2,h3,p,td,th{word-break:keep-all;overflow-wrap:anywhere}h
 .pipeline-declaration pre{tab-size:2}.pipeline-trigger{background:rgba(7,134,87,.3);color:#b8f5d5;font-weight:700}
 .pipeline-slide .pipeline-flow{margin-top:20px}.pipeline-slide .pipeline-flow>div{min-height:185px;padding-top:14px}.pipeline-slide .pipeline-number{font-size:26px;margin-bottom:8px}.pipeline-slide .pipeline-flow h3{font-size:25px;margin-bottom:10px}.pipeline-slide .pipeline-flow p{font-size:23px;line-height:1.4}.pipeline-slide .pipeline-gate{font-size:20px;margin-top:10px}.pipeline-slide .pipeline-details{grid-template-columns:550px minmax(0,1fr);gap:44px;margin-top:24px}.pipeline-rules pre{background:transparent;color:var(--navy);padding:0;border:0;box-shadow:none;font-size:24px;line-height:1.4}.pipeline-rules pre+pre{margin-top:22px}.pipeline-rules .technical-note{font-size:22px;line-height:1.45;margin-top:22px}.pipeline-declaration h3{display:flex;justify-content:space-between;align-items:baseline;gap:16px}.pipeline-declaration h3 span{font-size:19px;color:var(--muted);font-weight:400;white-space:nowrap}.pipeline-declaration pre{font-family:"Cascadia Mono",Consolas,monospace;font-size:22px;line-height:1.25;padding:20px;white-space:pre;overflow-wrap:normal;font-weight:400}
 .adoption-slide h1{font-size:64px;max-width:1736px}.adoption-intro{font-size:29px;line-height:1.55;margin:26px 0 38px}.adoption-comparison .feature-table{margin:0;box-shadow:none;border-radius:0}.adoption-comparison .feature-table th{font-size:24px;padding:20px 26px;background:var(--navy);color:var(--paper)}.adoption-comparison .feature-table th:first-child{width:310px}.adoption-comparison .feature-table th:nth-child(2){width:620px}.adoption-comparison .feature-table td{font-family:inherit;font-size:28px;line-height:1.55;padding:30px 26px;background:transparent;border-bottom:1px solid var(--line)}.adoption-comparison .feature-table td:first-child{width:310px;font-size:29px;font-weight:700;border-left:6px solid var(--blue)}.adoption-comparison .feature-table tr:nth-child(2) td:first-child{border-left-color:var(--green)}.adoption-comparison .feature-table tr:nth-child(3) td:first-child{border-left-color:var(--amber)}.adoption-comparison .feature-table td:nth-child(2){color:var(--muted)}.adoption-comparison .feature-table td:nth-child(3){font-weight:600}.adoption-next{margin-top:42px;max-width:1650px;font-size:38px;line-height:1.55;color:var(--navy)}.adoption-next strong{font-weight:750}
+.data-slide .table-name{padding:2px 8px;border-radius:3px;background:color-mix(in srgb,var(--amber) 45%,var(--paper));color:var(--navy);font-weight:700}
+.query-sql .condition-sql{display:block;white-space:normal;tab-size:2}.sql-line{display:block;min-height:1lh;white-space:pre-wrap;border-left:6px solid var(--sql-accent,transparent);padding-left:14px}.sql-structured,.sql-ranking{--sql-accent:var(--blue)}.sql-spatial{--sql-accent:var(--green)}.sql-semantic{--sql-accent:var(--amber)}.sql-line[data-condition]:not([data-condition="0"]){background:color-mix(in srgb,var(--sql-accent) 14%,transparent)}
+.query-destination-slide .query-conditions>div.condition-ranking{border-color:var(--amber)}.query-destination-slide .sql-ranking{--sql-accent:var(--amber)}
+.query-vector-slide .query-sql pre{height:460px;font-size:23px;line-height:1.3;tab-size:2}
+.ending-slide{padding:0;text-align:center}.slide.ending-slide.active{display:grid;place-items:center}.ending-slide h1{margin:0;font-size:100px;line-height:1.2}
 @media(max-width:600px){.deck-nav{left:8px;right:8px;justify-content:center}.deck-nav select{flex:1;max-width:none}}
-@media print{@page{size:1920px 1080px;margin:0}html,body{height:auto;overflow:visible;background:white}#deck{position:static;transform:none!important;left:0!important;top:0!important}.slide,.slide[hidden]{display:block!important;break-after:page;print-color-adjust:exact;-webkit-print-color-adjust:exact}.slide:last-child{break-after:auto}.deck-nav{display:none}}
+@media print{@page{size:1920px 1080px;margin:0}html,body{height:auto;overflow:visible;background:white}#deck{position:static;transform:none!important;left:0!important;top:0!important}.slide,.slide[hidden]{display:block!important;break-after:page;print-color-adjust:exact;-webkit-print-color-adjust:exact}.slide.ending-slide{display:grid!important;place-items:center}.slide:last-child{break-after:auto}.deck-nav{display:none}}
 </style></head><body><main id="deck">${slides}</main><nav class="deck-nav" aria-label="발표자료 이동"><button id="previous" type="button" aria-label="이전 슬라이드" title="이전 슬라이드">&#8592;</button><select id="slide-picker" aria-label="슬라이드 선택">${options}</select><button id="next" type="button" aria-label="다음 슬라이드" title="다음 슬라이드">&#8594;</button><output id="counter" aria-live="polite"></output></nav>
 <script>
 const slides=Array.from(document.querySelectorAll('.slide'));
