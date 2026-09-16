@@ -30,12 +30,12 @@ const render = (source, components) => renderToStaticMarkup(React.createElement(
   },
 }))
 
-async function validateLinks(node) {
+async function validateLinks(node, baseDirectory) {
   if (node.url && !/^(?:[a-z]+:|#|\/\/)/i.test(node.url)) {
     const pathname = decodeURIComponent(node.url.split('#')[0])
-    if (!outputs.has(pathname)) await access(resolve(directory, pathname))
+    if (baseDirectory !== directory || !outputs.has(pathname)) await access(resolve(baseDirectory, pathname))
   }
-  for (const child of node.children ?? []) await validateLinks(child)
+  for (const child of node.children ?? []) await validateLinks(child, baseDirectory)
 }
 
 const slideSource = await read('fleet-intelligence-slides.md')
@@ -46,8 +46,8 @@ const notes = parser.parse(await read('presenter-notes.md')).children
   .map(text).filter(title => title.startsWith('슬라이드 '))
 assert.equal(headings.length, 18, 'Expected 18 presentation slides')
 assert.deepEqual(notes, headings.map((node, index) => `슬라이드 ${index + 1} - ${text(node)}`))
-for (const name of ['README.md', 'blog-post.md', 'fleet-intelligence-slides.md', 'presenter-notes.md', 'THIRD-PARTY-NOTICES.md']) {
-  await validateLinks(parser.parse(await read(name)))
+for (const name of ['../README.md', '../infra/README.md', 'README.md', 'blog-post.md', 'fleet-intelligence-slides.md', 'presenter-notes.md', 'THIRD-PARTY-NOTICES.md']) {
+  await validateLinks(parser.parse(await read(name)), dirname(resolve(directory, name)))
 }
 
 const themeScript = `(() => {
@@ -145,7 +145,7 @@ function update(){const active=headings.filter(heading=>heading.getBoundingClien
 addEventListener('scroll',update,{passive:true});addEventListener('resize',update);update();
 `
 const articleDocument = document('Fleet Intelligence | HorizonDB 기술 설명', articleCss,
-  `<div class="progress" aria-hidden="true"></div><header><a class="brand" href="fleet-intelligence-slides.html">Fleet Intelligence</a><span class="meta">한국어 기술 설명 · 2026-09-15</span></header><div class="layout"><nav class="toc" aria-label="문서 목차">${toc}</nav><article>${article}<p class="article-footer meta">HorizonShip · Powered by HorizonDB</p></article></div>`, articleScript)
+  `<div class="progress" aria-hidden="true"></div><header><a class="brand" href="fleet-intelligence-slides.html">Fleet Intelligence</a><span class="meta">한국어 기술 설명 · 2026-09-16</span></header><div class="layout"><nav class="toc" aria-label="문서 목차">${toc}</nav><article>${article}<p class="article-footer meta">HorizonShip · Powered by HorizonDB</p></article></div>`, articleScript)
 
 for (const [name, content] of [['fleet-intelligence-slides.html', slidesDocument], ['blog-post.html', articleDocument]]) {
   if (checking) assert.equal(await read(name), content, `${name} is stale; run node docs/build-docs.mjs`)

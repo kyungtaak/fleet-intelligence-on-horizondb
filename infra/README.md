@@ -26,13 +26,15 @@ Foundry는 `AIServices/S0`이며 `gpt-5.4` 버전 `2026-03-05`와
 `text-embedding-3-small` 버전 `1`을 Global Standard, capacity 각각 10으로 배포합니다.
 capacity는 모델별 quota 단위이며 요청 건수나 토큰 수 자체가 아닙니다.
 
-DB 접속용 비밀번호 인증은 유지합니다. 채팅과 검색어 임베딩은 backend가 호출합니다.
+DB 접속용 비밀번호 인증은 유지합니다. 채팅과 검색어 임베딩은 provider 설정에 따라 backend에서 직접
+API를 호출하거나 HorizonDB의 모델 함수를 호출합니다. 실제 추론은 두 경로 모두 외부 모델에서 실행됩니다.
 배송 데이터 변경 후 벡터를 갱신하는 `azure_ai` pipeline은 DB가 Foundry를 직접 호출하며,
 현재 구성에서는 key 인증이 가능한 외부 Foundry가 필요합니다.
 
-모델 이름은 백엔드 기본값과 일치합니다. Agent Framework가 OpenAI endpoint를 직접 호출하므로
-Foundry 배포에는 project를 포함하지 않습니다. 포털에서 모델을 확인하고 테스트할 때는
-아래 project 전용 템플릿으로 추가합니다. 호스팅된 Agent Service와 웹 애플리케이션 호스팅은 포함하지 않습니다.
+모델 이름은 백엔드 기본값과 일치합니다. 두 provider 모두 리소스의 모델 endpoint를 사용하므로
+Foundry 전용 배포에는 project를 포함하지 않습니다. 포털에서 모델을 확인하고 테스트할 때는
+아래 project 전용 템플릿으로 추가합니다. 호스팅된 Agent Service는 사용하지 않으며,
+웹 애플리케이션 호스팅은 다음 Container Apps 배포로 별도 구성합니다.
 
 ## Azure Container Apps 배포
 
@@ -40,9 +42,24 @@ Foundry 배포에는 project를 포함하지 않습니다. 포털에서 모델�
 Foundry와 모델 deployment는 이 흐름에서 생성하거나 변경하지 않습니다. 기존 Azure OpenAI endpoint,
 subscription key, `gpt-5.4`, `text-embedding-3-small` deployment가 먼저 준비되어 있어야 합니다.
 
+PowerShell 7.4 이상, Azure CLI, [Azure Developer CLI](https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/install-azd) 1.15.0 이상이 필요합니다.
+Azure CLI와 azd에 각각 로그인한 뒤 저장소 루트에서 설정 스크립트를 실행합니다.
+
+```powershell
+az login
+azd auth login
+azd version
+```
+
+현재 hook은 `westus3`만 허용합니다. 대상 구독에 `Microsoft.App`, `Microsoft.ContainerRegistry`,
+`Microsoft.ManagedIdentity`, `Microsoft.HorizonDB`가 등록되어 있어야 하며 hook이 자동 등록하지는 않습니다.
+리소스 배포 외에 앱 Identity의 ACR Pull 역할을 만들 권한도 필요합니다.
+
 배포되는 앱 리소스는 ACR Basic, Container Apps Environment, frontend와 backend Container App,
 각 앱의 User Assigned Managed Identity와 ACR Pull 역할입니다. frontend만 public ingress를 사용합니다.
 Nginx가 같은 origin의 `/api` 요청을 내부 backend ingress로 전달합니다.
+설정 스크립트는 두 provider를 `azure_openai`로 저장합니다. `horizondb`로 변경하려면 대상 DB에
+모델 별칭을 먼저 준비해야 하며, 현재 azd 사전 검사는 provider와 관계없이 subscription key를 요구합니다.
 
 ### 기존 HorizonDB 사용
 
@@ -70,6 +87,8 @@ azd up
 
 `existing`은 기본적으로 `RUN_DATABASE_SETUP=false`입니다. 기존 schema와 데이터, model registry,
 pipeline을 변경하지 않습니다. DB가 아직 초기화되지 않았을 때만 설정 명령에 `-RunDatabaseSetup`을 추가합니다.
+이 옵션은 전체 setup을 실행하므로 기존 샘플 값과 인덱스·pipeline도 갱신합니다. 모델 별칭만 추가할 때는
+[루트 README의 `--models-only` 절차](../README.md#모델-호출-위치-선택)를 사용합니다.
 
 ### 새 HorizonDB 생성
 
@@ -114,6 +133,7 @@ azd 환경 값은 로컬 `.azure` 폴더에 저장되고 Git에서 제외됩니�
 
 `postdeploy` hook은 public frontend의 `/api/health`를 호출해 HorizonDB 연결, Agent Framework,
 배송·임베딩 개수와 SQ4 DiskANN 설정을 확인합니다. 성공하면 frontend URL을 출력합니다.
+이 검사는 실제 모델 추론을 호출하지 않으므로 배포 후 검색과 대화도 별도로 확인해야 합니다.
 Docker Desktop 없이도 ACR remote build를 사용하므로 로컬 Docker daemon은 필수가 아닙니다.
 
 배포 환경은 `CAPTURE_QUERY_PLAN=true`를 기본으로 사용합니다. 검색할 때 backend가

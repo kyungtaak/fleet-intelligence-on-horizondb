@@ -1,6 +1,6 @@
 # Fleet Intelligence 문서
 
-HorizonShip의 현재 구현을 설명하는 한국어 발표·시연 자료입니다. 기준일은 2026-09-15입니다.
+HorizonShip의 현재 구현을 설명하는 한국어 발표·시연 자료입니다. 실행·배포 안내는 2026-09-16 기준이며, 시연 결과와 측정값은 각 문서에 기록한 검증일 기준입니다.
 제품명 **Fleet Intelligence**, 부제 **Powered by HorizonDB**, 화면 이름 **Search Workbench**, **Agent with Tools**는 영어로 유지합니다. 본문과 설명 제목은 한국어로 작성하고 SQL·API·제품 이름은 코드와 같은 표기를 사용합니다.
 
 ## 읽는 순서
@@ -13,7 +13,7 @@ HorizonShip의 현재 구현을 설명하는 한국어 발표·시연 자료입�
 | [기술 설명 Markdown](blog-post.md) | 검토·수정용 원고 |
 | [슬라이드 Markdown](fleet-intelligence-slides.md) | 발표자료 HTML의 원고 |
 | [프로젝트 가이드](../README.md) | 실행 환경, API, 검색 규칙, DB 설정 |
-| [인프라 가이드](../infra/README.md) | PowerShell·Bicep 사전 조회와 승인 기반 배포 |
+| [인프라 가이드](../infra/README.md) | PowerShell·Bicep 사전 조회·배포와 azd Container Apps 배포 |
 
 HTML은 별도 서버 없이 열 수 있습니다. 발표자료는 레퍼런스와 같은 1920×1080(16:9) 구성으로 화면 크기에 맞춰 전체를 축소합니다. 이전·다음 버튼, 슬라이드 선택, 방향키·Page Up/Down·Home/End로 이동합니다. 작은 화면에서는 가로 보기를 권장하며, 캡처 이미지를 누르면 원본 크기로 열 수 있습니다. 브라우저 인쇄에서는 전체 18장을 장별로 출력합니다.
 
@@ -41,9 +41,9 @@ CSS와 JavaScript는 HTML 안에 포함됩니다. 화면 이미지는 `media`의
 
 ## 출처와 라이선스
 
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)에 출처, 참고한 커밋과 원본 MIT 라이선스를 보존했습니다. 원본 문서·이미지의 중복 보관본은 제거했으며, 발표자료에 사용하는 CSS는 [slides-base.css](slides-base.css)에 내용 변경 없이 분리했습니다. 원문과 원본 이미지는 고지 문서의 고정 커밋 링크에서 확인합니다. 현재 시연용 이미지와 영상은 유지합니다.
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)에 출처, 참고한 커밋과 원본 MIT 라이선스를 보존했습니다. 원본 문서·이미지의 중복 보관본은 제거했으며, 발표자료에 사용하는 CSS는 [slides-base.css](slides-base.css)에 내용 변경 없이 분리했습니다. 원문과 원본 이미지는 고지 문서의 고정 커밋 링크에서 확인합니다. 현재 앱의 실제 화면 캡처는 `media`에 유지합니다.
 
-참고본의 `/api/search`, `default-chat`, 단일 테이블 임베딩, `EXPLAIN ANALYZE`, `azd up`·Container Apps 설명은 현재 앱의 구현을 뜻하지 않습니다. 고객 공유에는 이 폴더의 개정본을 사용합니다.
+참고본의 `/api/search`, `default-chat`, 단일 테이블 임베딩, `EXPLAIN ANALYZE` 설명은 현재 앱의 검색 흐름과 다릅니다. 이 저장소도 `azd up`·Container Apps 배포를 지원하지만 기존/신규 HorizonDB 선택과 외부 모델 endpoint 사용 등 세부 구성은 [현재 배포 안내](../infra/README.md#azure-container-apps-배포)를 따릅니다. 고객 공유에는 이 폴더의 개정본을 사용합니다.
 
 ## 문서 갱신과 검사
 
@@ -55,4 +55,4 @@ node docs/build-docs.mjs
 node docs/build-docs.mjs --check
 ```
 
-Markdown 원고를 수정한 뒤 HTML을 다시 생성합니다. 발표자료는 [slides-template.mjs](slides-template.mjs)에서 슬라이드 유형별로 배치하며, [slides-base.css](slides-base.css)를 읽어 결과 HTML에 포함합니다. 원본 HTML이나 보관 폴더 없이 문서를 생성할 수 있습니다. `--check`는 로컬 링크·이미지 존재, 발표자료와 노트의 번호·제목 일치, 생성 HTML의 최신 상태를 검사합니다. 출처와 라이선스 고지의 로컬 링크도 검사합니다. 실행 전에 두 개발 서버를 시작하는 절차와 데모 주의사항은 [발표자 노트](presenter-notes.md)를 참고합니다.
+Markdown 원고를 수정한 뒤 HTML을 다시 생성합니다. 발표자료는 [slides-template.mjs](slides-template.mjs)에서 슬라이드 유형별로 배치하며, [slides-base.css](slides-base.css)를 읽어 결과 HTML에 포함합니다. 원본 HTML이나 보관 폴더 없이 문서를 생성할 수 있습니다. `--check`는 루트·인프라 README와 이 폴더의 문서에 있는 로컬 링크·이미지 존재, 발표자료와 노트의 번호·제목 일치, 생성 HTML의 최신 상태를 검사합니다. 출처와 라이선스 고지의 로컬 링크도 검사합니다. 코드와 설명의 의미가 일치하는지, 외부 URL이나 페이지 내부 앵커가 유효한지는 자동으로 검사하지 않습니다. 실행 전에 두 개발 서버를 시작하는 절차와 데모 주의사항은 [발표자 노트](presenter-notes.md)를 참고합니다.

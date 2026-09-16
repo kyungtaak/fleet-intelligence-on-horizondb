@@ -1,6 +1,6 @@
-# HorizonShip
+# Fleet Intelligence on HorizonDB
 
-HorizonShip은 배송 현황 조회, 지도 표시, 자연어 검색을 함께 구현한 샘플 애플리케이션입니다.
+Fleet Intelligence on HorizonDB는 배송 현황 조회, 지도 표시, 자연어 검색을 함께 구현한 샘플 애플리케이션입니다.
 
 화면 이름은 **Fleet Intelligence**이며, 왼쪽 **Search Workbench**에서 조건을 직접 지정하거나
 오른쪽 **Agent with Tools**에 자연어로 질문할 수 있습니다.
@@ -26,7 +26,7 @@ HorizonShip은 배송 현황 조회, 지도 표시, 자연어 검색을 함께 �
 
 ## 사용자 화면
 
-![배송 목록, 세계 지도, 배송 어시스턴트가 표시된 HorizonShip 화면](docs/media/app.png)
+![배송 목록, 세계 지도, 배송 어시스턴트가 표시된 Fleet Intelligence 화면](docs/media/fleet-overview.png)
 
 본문과 제목은 Pretendard를 사용하며 SQL은 고정폭 폰트를 유지합니다. 한글 폰트는 버전이 고정된 CDN에서
 불러오고, 연결할 수 없으면 설치된 한글 폰트로 표시합니다. 초기 예시에는 상태·권역·반경뿐 아니라
@@ -38,6 +38,9 @@ ETA 기간, 의미·근접도 가중 정렬, 목적지 거리순 검색도 포�
 [18장 HTML 발표자료](docs/fleet-intelligence-slides.html), [발표자 노트](docs/presenter-notes.md),
 [기술 설명 HTML](docs/blog-post.html)과 [Markdown 원고](docs/blog-post.md)를 함께 제공합니다.
 참고 프로젝트의 출처, 고정 커밋 링크와 MIT 라이선스는 [문서 출처와 라이선스](docs/THIRD-PARTY-NOTICES.md)에 있습니다. 원본 문서·이미지의 중복 보관본은 제거하고 발표자료에 사용하는 CSS만 별도로 유지합니다.
+
+구현을 정리할 때 [FranckPachot/horizondb-fleet-intelligence](https://github.com/FranckPachot/horizondb-fleet-intelligence/tree/main)도 참고했습니다.
+Azure HorizonDB, PostGIS, DiskANN, React와 조회 결과에 근거한 AI 응답을 결합한 공간·의미 검색 데모입니다.
 
 ## 아키텍처
 
@@ -201,8 +204,9 @@ ETA의 오늘·내일·이번 주·다음 주는 요청을 시작할 때 `SEARCH
 변환합니다. 모호한 기간은 확인 질문을 합니다. 날짜 계산은 모델이 하므로 실행 내역에서 확정된 날짜를
 확인해야 합니다. 이 조건은 저장된 도착 예정일을 검사하며 실제 도착 이력을 조회하지 않습니다.
 
-`semantic_spatial`은 `cargo_query`, `nearby_location`, `radius_km`이 모두 있어야 합니다.
-`position_field`의 좌표에서 기준 도시까지 거리를 계산하고 아래 점수를 내림차순으로 정렬합니다.
+`semantic_spatial`은 `cargo_query`, 반경 기준점, `radius_km`이 모두 있어야 합니다.
+채팅은 등록된 도시(`nearby_location`)를, 직접 조건 검색은 지도에서 선택한 좌표(`nearby_point`)를
+기준점으로 사용합니다. `position_field`의 좌표에서 기준점까지 거리를 계산하고 아래 점수를 내림차순으로 정렬합니다.
 동점은 배송 번호순입니다. 반경만 지정한 일반 의미 검색의 순서는 바뀌지 않습니다.
 
 ```text
@@ -318,7 +322,8 @@ AI 결과 카드의 본문을 누르면 배송을 선택하고 상세를 표시�
 샘플 도시 목록을 계속 사용합니다. 새 도시를 반경 중심점이나 장소명 조건으로 조회하려면 목록에 추가합니다.
 지원하지 않는 국가·제외 조건 등을 벡터 검색으로 대신 처리하지 않도록 Agent에 지시합니다.
 
-반경은 등록된 도시 좌표를 중심으로 `geography` 거리(미터)로 검사합니다. 항로 거리나 항만 경계 검사가 아닙니다.
+반경은 등록된 도시 좌표 또는 직접 선택한 지도 좌표를 중심으로 `geography` 거리(미터)로 검사합니다.
+항로 거리나 항만 경계 검사가 아닙니다.
 경계 테이블만 추가하며 기존 배송 데이터·임베딩은 그대로 유지합니다. 데이터가 커지면
 출발지·도착지 geometry GiST 인덱스와 `geography` 표현식 GiST 인덱스를 실행 계획에 맞게 추가해야 합니다.
 스키마에는 ETA B-tree와 현재 위치의 geography 표현식 GiST 인덱스가 포함됩니다.
@@ -537,14 +542,14 @@ Node.js는 20.19 이상이 필요합니다. 명령을 찾을 수 없으면 VS Co
 ### 2. Azure 연결 정보 준비
 
 Azure 리소스가 없다면 [인프라 배포 안내](infra/README.md)에 따라 West US 3에
-HorizonDB를 배포합니다. Foundry와 두 모델은 별도 스크립트로 선택 배포하며, 기존 Foundry의 모델을
-사용하면 이 단계를 생략합니다. 새 Foundry는 Entra ID 인증만 허용합니다. 등록과 배포는 별도 단계이며,
-배포 시 비용이 발생합니다.
+HorizonDB를 배포합니다. 현재 DB pipeline에는 key 인증을 허용하는 기존 Foundry의 embedding 모델이
+필요합니다. 별도 Foundry 배포 스크립트는 Entra ID 전용 리소스를 만들므로 이 pipeline의 준비 단계를
+대신하지 않습니다. 등록과 배포는 별도 단계이며, 배포 시 비용이 발생합니다.
 
 애플리케이션은 실제 Azure 서비스를 사용합니다. 다음 정보를 미리 준비합니다.
 
 - Azure HorizonDB 호스트, 데이터베이스 이름, 사용자 이름, 비밀번호
-- Azure OpenAI endpoint와 인증 정보(API 키 또는 Entra ID)
+- Azure OpenAI endpoint와 setup용 subscription key. 직접 API 호출은 Entra ID도 지원
 - Azure OpenAI의 `gpt-5.4`, `text-embedding-3-small` deployment
 
 모르는 값은 Azure 관리자에게 확인합니다. 키나 비밀번호를 Git에 커밋할 파일에 넣지 마세요.
@@ -808,7 +813,8 @@ npm run dev
 - 프론트엔드가 연결되지 않으면 백엔드 터미널이 실행 중인지 확인하고
   `http://127.0.0.1:8000/docs`에 접속해 봅니다.
 - 백엔드에서 설정 누락이나 인증 오류가 발생하면 백엔드의 `.env` 값을 확인한 뒤
-  데이터베이스 준비 명령을 다시 실행합니다.
+  백엔드를 재시작합니다. DB alias 등록만 필요하면 `--models-only`를 사용합니다.
+  전체 setup은 기존 샘플 값을 갱신하고 인덱스를 다시 만들므로 인증 오류 해결을 위해 반복하지 않습니다.
 - `uv`를 찾을 수 없으면 VS Code를 다시 시작하고 PATH 설정을 확인합니다.
 - PowerShell에서 `npm` 실행 시 스크립트 실행이 제한되면 `npm.cmd run dev`처럼
   `npm` 대신 `npm.cmd`를 사용합니다.
@@ -817,46 +823,60 @@ npm run dev
 
 ## 실행에 필요한 조건
 
-HorizonShip은 실제 클라우드 서비스에 연결하는 구성으로 동작합니다.
+Fleet Intelligence on HorizonDB는 실제 클라우드 서비스에 연결하는 구성으로 동작합니다.
 HorizonDB는 PostGIS 좌표와 Azure OpenAI 임베딩을 저장하고 DiskANN 인덱스로 벡터 검색을 가속합니다.
 Agent Framework는 `gpt-5.4`로 조회 결과에 근거한 답변을 생성합니다.
 
 데이터베이스 연결 설정이나 `AZURE_OPENAI_ENDPOINT`가 없으면 FastAPI 시작이 실패합니다.
-`AZURE_OPENAI_KEY`가 없으면 백엔드의 채팅과 임베딩 모두 Entra ID를 사용합니다.
+`azure_openai` provider는 `AZURE_OPENAI_KEY`가 있으면 key 인증을, 없으면 Entra ID를 사용합니다.
+`horizondb` provider는 DB model registry에 등록된 alias와 인증 정보를 사용하며 Entra ID로 전환하지 않습니다.
+두 provider가 모두 `horizondb`이고 alias가 준비되어 있다면 앱 실행 시 모델 key를 지정하지 않아도 됩니다.
+전체 setup과 외부 모델 등록에는 여전히 subscription key가 필요합니다.
 자격 증명과 권한 오류는 실제 모델 호출 시 발생할 수 있으며, 앱 시작 성공이 인증 성공을 보장하지는 않습니다.
-DB에 저장된 임베딩 설정과 백엔드 설정이 다르거나, Azure 임베딩이 없는 배송이 하나라도 있거나,
-기본 DiskANN 인덱스를 사용할 수 없어도 시작하지 않습니다.
+배송 데이터가 없거나, DB에 저장된 임베딩 설정과 백엔드 설정이 다르거나, 임베딩이 없는 배송이 하나라도
+있거나, SQ4 DiskANN 인덱스가 유효하지 않아도 시작하지 않습니다. DB provider의 함수·alias와 일곱 권역의
+존재도 검사합니다.
 
 ## 벡터 검색
 
-백엔드가 검색어를 1,536차원 벡터로 변환한 뒤 Psycopg 매개변수로 SQL에 전달합니다.
-거리 연산식을 `ORDER BY ... LIMIT`에 유지해 DiskANN 인덱스를 사용할 수 있도록 구성합니다.
-실제 인덱스 사용 여부는 데이터베이스의 실행 계획에 따라 달라집니다.
+백엔드는 선택한 provider로 검색어를 1,536차원 벡터로 변환한 뒤 Psycopg 매개변수로 SQL에 전달합니다.
+벡터는 배송 테이블이 아닌 `shipment_embeddings`에 저장하며 `shipment_id`로 배송과 연결합니다.
+의미 필드가 변경되어 pipeline을 기다리는 배송은 job과 embedding의 `content_version`이 같아질 때까지
+의미 검색에서 제외합니다. 아래는 조회 열을 줄인 코사인 거리순 검색 예시입니다.
 
 ```sql
 WITH query_vector AS (
   SELECT %s::public.vector(1536) AS embedding
 )
 SELECT
-    shipment.shipment_number,
-    shipment.title,
-    1 - (shipment.embedding <=> query_vector.embedding) AS cosine_similarity
-FROM horizon_ship.shipments AS shipment
+  s.shipment_number,
+  s.title,
+  1 - (se.embedding <=> query_vector.embedding) AS similarity
+FROM horizon_ship.shipments AS s
+JOIN horizon_ship.shipment_embeddings AS se
+  ON se.shipment_id = s.id
+LEFT JOIN horizon_ship.shipment_embedding_jobs AS sej
+  ON sej.shipment_id = s.id
 CROSS JOIN query_vector
-WHERE shipment.status = 'delayed'
-ORDER BY shipment.embedding <=> query_vector.embedding
-LIMIT 5;
+WHERE (%s::text IS NULL OR s.status = %s)
+  AND (sej.shipment_id IS NULL OR sej.content_version = se.content_version)
+ORDER BY se.embedding <=> query_vector.embedding
+LIMIT %s;
 ```
 
 위 SQL의 `%s`는 Psycopg 매개변수 자리입니다. SQL 콘솔에 그대로 실행하는 문장이 아닙니다.
+지연된 배송 상위 5건을 구조화 검색으로 요청하면 `[검색어 벡터, "delayed", "delayed", 6]`을 바인딩합니다.
+추가 결과 확인용 한 행을 더 조회하고 상위 5건만 반환합니다.
+코사인 거리 연산식을 `ORDER BY ... LIMIT`에 유지해 DiskANN 인덱스를 사용할 수 있도록 구성하며,
+실제 사용 여부는 실행 계획에 따라 달라집니다. `semantic_spatial`은 가중 점수로 정렬하는 별도 경로입니다.
 
 기본 인덱스는 HorizonDB의 spherical quantization 미리 보기 기능을 사용합니다.
 이 설정은 벡터를 낮은 비트 수로 압축해 검색 비용을 줄이는 방식입니다.
 DiskANN은 근사 최근접 이웃 검색이므로 전체 벡터를 정확히 비교한 결과와 일부 차이가 날 수 있습니다.
 
 ```sql
-CREATE INDEX shipments_embedding_diskann_idx
-    ON horizon_ship.shipments
+CREATE INDEX shipment_embeddings_diskann_idx
+  ON horizon_ship.shipment_embeddings
     USING diskann (embedding vector_cosine_ops)
     WITH (
         spherical_quantized = true,
@@ -865,25 +885,29 @@ CREATE INDEX shipments_embedding_diskann_idx
     );
 ```
 
-필터가 있는 요청은 쿼리 실행 전에 DiskANN의 strict iterative search와 filter hook을 활성화합니다.
-이 설정은 해당 트랜잭션 안에서만 적용됩니다.
+DiskANN의 strict iterative search와 filter hook 등 공통 설정 6개는 연결 풀이 새 연결을 만들 때
+`SET SESSION`으로 적용하고 초기화 트랜잭션을 커밋합니다. 연결을 재사용하는 다음 요청에도 유지되며,
+개별 검색 요청이나 서버·DB 전체 기본값을 바꾸는 설정이 아닙니다.
 
 ## API
 
 | 메서드 | 경로 | 역할 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 데이터베이스, 확장 기능, 임베딩, 어시스턴트 준비 상태 확인 |
+| `GET` | `/api/health` | DB 연결, 확장·임베딩·인덱스 상태, 모델·provider 설정 조회 |
 | `GET` | `/api/shipments` | 배송 목록 조회, 선택적으로 상태·텍스트 필터 적용 |
 | `GET` | `/api/shipments/stats` | 상태별 배송 건수 조회 |
 | `GET` | `/api/shipments/embedding-status` | 배송별 pipeline 요청 version과 검색 가능한 embedding version 비교 |
-| `GET` | `/api/shipments/{number}` | 배송 상세 정보와 PostGIS 좌표 조회 |
+| `GET` | `/api/shipments/{shipment_number}` | 배송 상세 정보와 PostGIS 좌표 조회 |
 | `POST` | `/api/shipments` | 배송 1건 추가 |
 | `POST` | `/api/shipments/bulk` | 최대 20건을 한 transaction으로 추가 |
 | `DELETE` | `/api/shipments/demo` | 요청한 ID 중 데모 표식이 있는 배송만 삭제. embedding 처리 중이면 409 반환 |
-| `PATCH` | `/api/shipments/{number}` | 선택한 배송의 상태, 위치, 좌표, ETA, metadata 수정 |
+| `PATCH` | `/api/shipments/{shipment_number}` | 선택한 배송의 화물명·설명·장소명·상태·좌표·ETA·metadata 수정 |
+| `POST` | `/api/search/criteria` | Search Workbench의 상태·ETA·지도 반경·화물 의미 조건으로 직접 검색. Agent 호출 없음 |
 | `POST` | `/api/search` | 코사인 거리 기반 벡터 검색 직접 실행 |
 | `POST` | `/api/chat` | Agent Framework 답변과 근거가 된 배송 레코드 반환 |
 | `POST` | `/api/chat/stream` | 검색 실행 내역과 Agent Framework 응답을 NDJSON으로 전송 |
+
+`/api/health`는 모델 추론을 실행하지 않습니다. 모델 인증과 실제 응답 여부는 검색·대화 요청으로 별도 확인합니다.
 
 배송 목록 제목 옆 데이터 입력 버튼을 누르면 단건 update·insert와 20건 bulk insert를 실행할 수 있습니다.
 의미 필드가 바뀐 배송은 DB 반영, embedding 대기, 검색 가능 순서로 상태를 표시합니다.

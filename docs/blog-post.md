@@ -134,10 +134,12 @@ SHIP-0024의 `unknown`은 위치 갱신 미보고를 가정한 명시적 샘플 
 
 ## 실행·검증·운영 전 확인
 
-Backend는 uv, frontend는 npm으로 별도 실행합니다. 인프라는 PowerShell·Bicep으로 HorizonDB와 선택적 Foundry를 준비하며 조회 전용 Check, WhatIf, 승인 후 Deploy 순서를 사용합니다. 원본의 `azd up`·Container Apps 배포는 현재 저장소에 없습니다. 환경별 인증과 DB pipeline의 모델 endpoint 요구사항은 [인프라 README](../infra/README.md)를 확인합니다.
+로컬에서는 backend를 uv, frontend를 npm으로 별도 실행합니다. HorizonDB와 선택적 Foundry는 PowerShell·Bicep의 조회 전용 Check, WhatIf, 승인 후 Deploy 순서로 준비할 수 있습니다.
+
+앱 호스팅은 [azure.yaml](../azure.yaml)의 `azd up` 흐름으로도 지원합니다. ACR과 Container Apps를 배포하고 HorizonDB는 기존 cluster 연결 또는 신규 생성을 선택합니다. 이 흐름은 Foundry나 모델 deployment를 만들지 않으므로 key 인증이 가능한 기존 모델 endpoint가 필요합니다. 기존 DB는 기본적으로 setup을 실행하지 않으며, 신규 DB는 최초 backend 시작 때 스키마·샘플·임베딩·인덱스·pipeline을 준비합니다. 설정과 방화벽, 종료 시 삭제 범위는 [인프라 README](../infra/README.md#azure-container-apps-배포)를 확인합니다.
 
 2026-09-15의 기존 구현 검증에서는 backend 147개 테스트와 실제 DB 모델·ETA·반경·가중 검색을 확인했습니다. SQL 범위 연결은 별도 6개 테스트가 있으며 frontend 빌드·lint와 실제 브라우저 검사를 수행했습니다. 문서의 캡처는 현재 앱에서 저장한 화면이며 원본의 측정값을 재사용하지 않았습니다. 모델의 모든 표현, 모든 환경의 계획, 운영 성능을 보장하는 검증은 아닙니다.
 
-현재 API는 인증 없는 로컬 데모용입니다. 운영에서는 사용자 인증, 데이터 접근 권한, 검색어·조건의 마스킹, 네트워크와 timeout 정책을 추가해야 합니다. HorizonDB Preview의 지원 리전·구독·모델 가용성도 배포 시 다시 확인합니다. 이 샘플의 목적은 추천 문장만 보여주는 것이 아니라, 어떤 조건으로 어떤 배송을 조회했는지 확인할 수 있는 구현을 제공하는 데 있습니다.
+현재 API는 인증 없는 데모용입니다. Container Apps에서는 backend ingress를 내부로 제한하지만, public frontend의 Nginx가 `/api`를 전달하므로 API가 인증으로 보호되는 것은 아닙니다. 운영에서는 사용자 인증, 데이터 접근 권한, 검색어·조건의 마스킹, 네트워크와 timeout 정책을 추가해야 합니다. HorizonDB Preview의 지원 리전·구독·모델 가용성도 배포 시 다시 확인합니다. 이 샘플의 목적은 어떤 조건으로 어떤 배송을 조회했는지 확인할 수 있는 구현을 제공하는 데 있습니다.
 
 발표용 요약은 [슬라이드](fleet-intelligence-slides.html), 실제 시연 순서는 [발표자 노트](presenter-notes.md), 원본과 개정본 구분은 [문서 안내](README.md)를 참고합니다.
