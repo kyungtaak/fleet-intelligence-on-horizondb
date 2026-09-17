@@ -49,6 +49,22 @@ export function findSqlRange(source: string, plan: QueryPlanNode): SqlPlanMatch 
   }
   const candidates: SqlRange[] = []
   const nodeType = plan['Node Type']
+  const indexName = plan['Index Name']?.toLowerCase()
+  const spatialIndex = nodeType.includes('Index Scan') && indexName
+    && (indexName.includes('geography') || indexName.endsWith('_gix'))
+  if (spatialIndex) {
+    const predicates: SqlRange[] = []
+    tree.iterate({ enter(reference) {
+      if (reference.name !== 'Parens') return
+      const functionName = reference.node.prevSibling
+      if (!functionName || !['Identifier', 'QuotedIdentifier', 'CompositeIdentifier'].includes(functionName.name)) return
+      if (identifier(functionName) === 'st_dwithin') predicates.push({ from: functionName.from, to: reference.to })
+    } })
+    if (predicates.length !== 1) {
+      return { range: null, label: predicates.length ? '여러 ST_DWithin 조건과 일치' : '직접 연결되는 ST_DWithin 조건 없음' }
+    }
+    return { range: predicates[0], label: 'ST_DWithin 공간 조건' }
+  }
   const clause = nodeType === 'Limit' ? 'LIMIT'
     : ['Sort', 'Incremental Sort'].includes(nodeType) ? 'ORDER'
       : nodeType === 'Aggregate' ? 'GROUP' : null

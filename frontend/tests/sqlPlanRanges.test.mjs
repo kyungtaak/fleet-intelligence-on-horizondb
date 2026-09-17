@@ -45,3 +45,20 @@ test('multiple matching subqueries and self joins are not guessed', () => {
 test('quoted identifiers retain their case', () => {
   assert.equal(selected('SELECT * FROM "horizon_ship"."Shipments" AS "source";', { 'Node Type': 'Seq Scan', 'Relation Name': 'Shipments' }), 'FROM "horizon_ship"."Shipments" AS "source"')
 })
+
+test('spatial index scans link to the indexed ST_DWithin predicate', () => {
+  const sql = `SELECT s.id
+FROM horizon_ship.shipments AS s
+WHERE public.ST_DWithin(
+  s.current_position::public.geography,
+  public.ST_SetSRID(public.ST_MakePoint(%s, %s), 4326)::public.geography,
+  %s
+)
+ORDER BY s.shipment_number
+LIMIT %s;`
+  assert.equal(selected(sql, {
+    'Node Type': 'Index Scan',
+    'Relation Name': 'shipments',
+    'Index Name': 'shipments_current_geography_idx',
+  }), 'public.ST_DWithin( s.current_position::public.geography, public.ST_SetSRID(public.ST_MakePoint(%s, %s), 4326)::public.geography, %s )')
+})

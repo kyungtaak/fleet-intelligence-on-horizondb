@@ -42,7 +42,7 @@ function CopyButton({ text, label }: { text: string; label: string }) {
         setState('failed')
       }
     }}>
-      {state === 'copied' ? <Check size={14} /> : <Copy size={14} />}
+      {state === 'copied' ? <Check size={16} /> : <Copy size={16} />}
     </button>
   )
 }
