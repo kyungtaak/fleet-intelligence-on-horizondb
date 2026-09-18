@@ -35,7 +35,7 @@ ETA 기간, 의미·근접도 가중 정렬, 목적지 거리순 검색도 포�
 ### 발표·시연 문서
 
 [문서 안내](docs/README.md)에서 현재 구현 기준의 한국어 자료를 확인할 수 있습니다.
-[18장 HTML 발표자료](docs/fleet-intelligence-slides.html), [발표자 노트](docs/presenter-notes.md),
+[18장 HTML 발표자료](docs/fleet-intelligence-slides.html),
 [기술 설명 HTML](docs/blog-post.html)과 [Markdown 원고](docs/blog-post.md)를 함께 제공합니다.
 참고 프로젝트의 출처, 고정 커밋 링크와 MIT 라이선스는 [문서 출처와 라이선스](docs/THIRD-PARTY-NOTICES.md)에 있습니다. 원본 문서·이미지의 중복 보관본은 제거하고 발표자료에 사용하는 CSS만 별도로 유지합니다.
 

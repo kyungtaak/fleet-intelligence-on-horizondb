@@ -41,12 +41,8 @@ async function validateLinks(node, baseDirectory) {
 const slideSource = await read('fleet-intelligence-slides.md')
 const slideTree = parser.parse(slideSource)
 const headings = slideTree.children.filter(node => node.type === 'heading' && node.depth === 2)
-const notes = parser.parse(await read('presenter-notes.md')).children
-  .filter(node => node.type === 'heading' && node.depth === 2)
-  .map(text).filter(title => title.startsWith('슬라이드 '))
 assert.equal(headings.length, 18, 'Expected 18 presentation slides')
-assert.deepEqual(notes, headings.map((node, index) => `슬라이드 ${index + 1} - ${text(node)}`))
-for (const name of ['../README.md', '../infra/README.md', 'README.md', 'blog-post.md', 'fleet-intelligence-slides.md', 'presenter-notes.md', 'THIRD-PARTY-NOTICES.md']) {
+for (const name of ['../README.md', '../infra/README.md', 'README.md', 'blog-post.md', 'fleet-intelligence-slides.md', 'THIRD-PARTY-NOTICES.md']) {
   await validateLinks(parser.parse(await read(name)), dirname(resolve(directory, name)))
 }
 
@@ -151,4 +147,4 @@ for (const [name, content] of [['fleet-intelligence-slides.html', slidesDocument
   if (checking) assert.equal(await read(name), content, `${name} is stale; run node docs/build-docs.mjs`)
   else await writeFile(resolve(directory, name), content, 'utf8')
 }
-console.log(`${checking ? 'Verified' : 'Generated'} 2 HTML documents; 18 slides/notes aligned; local links and images present.`)
+console.log(`${checking ? 'Verified' : 'Generated'} 2 HTML documents; 18 slides; local links and images present.`)

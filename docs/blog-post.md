@@ -142,4 +142,4 @@ SHIP-0024의 `unknown`은 위치 갱신 미보고를 가정한 명시적 샘플 
 
 현재 API는 인증 없는 데모용입니다. Container Apps에서는 backend ingress를 내부로 제한하지만, public frontend의 Nginx가 `/api`를 전달하므로 API가 인증으로 보호되는 것은 아닙니다. 운영에서는 사용자 인증, 데이터 접근 권한, 검색어·조건의 마스킹, 네트워크와 timeout 정책을 추가해야 합니다. HorizonDB Preview의 지원 리전·구독·모델 가용성도 배포 시 다시 확인합니다. 이 샘플의 목적은 어떤 조건으로 어떤 배송을 조회했는지 확인할 수 있는 구현을 제공하는 데 있습니다.
 
-발표용 요약은 [슬라이드](fleet-intelligence-slides.html), 실제 시연 순서는 [발표자 노트](presenter-notes.md), 원본과 개정본 구분은 [문서 안내](README.md)를 참고합니다.
+발표용 요약은 [슬라이드](fleet-intelligence-slides.html), 실행 절차는 [프로젝트 README](../README.md), 문서 구성은 [문서 안내](README.md)를 참고합니다.

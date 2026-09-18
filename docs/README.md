@@ -8,7 +8,6 @@ HorizonShip의 현재 구현을 설명하는 한국어 발표·시연 자료입�
 | 문서 | 용도 |
 | --- | --- |
 | [발표자료 HTML](fleet-intelligence-slides.html) | 브라우저에서 바로 여는 본문 13장 + 엔딩 1장 + 참고 4장 |
-| [발표자 노트](presenter-notes.md) | 슬라이드별 설명과 실제 시연 순서 |
 | [기술 설명 HTML](blog-post.html) | 목차가 있는 한국어 기술 설명 문서 |
 | [기술 설명 Markdown](blog-post.md) | 검토·수정용 원고 |
 | [슬라이드 Markdown](fleet-intelligence-slides.md) | 발표자료 HTML의 원고 |
@@ -23,7 +22,7 @@ CSS와 JavaScript는 HTML 안에 포함됩니다. 화면 이미지는 `media`의
 
 ## 반영한 변경
 
-도입부 2장은 하나의 HorizonDB에서 정형·공간·벡터 데이터를 함께 저장하고 조회하는 샘플의 목적을 설명합니다. PostGIS·pgvector·DiskANN과 임베딩 갱신 pipeline의 역할을 표시하고 외부 Foundry는 데이터베이스 경계 밖에 배치했습니다. 3장은 상태·ETA·권역·화물 의미 또는 거리 정렬을 결합하는 세 가지 업무 질문으로 이어집니다. 새 질문의 실제 조건과 결과는 발표자 노트에 기록했습니다.
+도입부 2장은 하나의 HorizonDB에서 정형·공간·벡터 데이터를 함께 저장하고 조회하는 샘플의 목적을 설명합니다. PostGIS·pgvector·DiskANN과 임베딩 갱신 pipeline의 역할을 표시하고 외부 Foundry는 데이터베이스 경계 밖에 배치했습니다. 3장은 상태·ETA·권역·화물 의미 또는 거리 정렬을 결합하는 세 가지 업무 질문으로 이어집니다. 질문별 조건과 확인 결과는 7~9장에서 설명합니다.
 
 4장의 두 검색 경로 설명 다음에는 5장의 실제 앱 화면이 이어집니다. 6장은 검색에 필요한 정형·PostGIS·vector 컬럼과 테이블 연결만 보여줍니다. 12장의 pipeline 설명 다음에는 13장 ‘고객 데이터로 적용하는 방법’으로 본문 설명을 마칩니다. 검색 대상과 조건, 위치·설명 필드와 정렬, 변경 후 갱신을 고객 업무에 맞추고 대표 질문과 샘플 데이터로 결과를 확인하는 방법을 제시합니다. 14장은 `end`만 표시하는 엔딩이며, 15~18장은 검증·운영 주의사항, 예상 계획, 전체 테이블 구조, Workbench 조작의 참고 자료입니다.
 
@@ -37,7 +36,7 @@ CSS와 JavaScript는 HTML 안에 포함됩니다. 화면 이미지는 `media`의
 
 `media/fleet-overview.png`, `media/fleet-eta-result.png`, `media/fleet-query-plan.png`는 현재 앱에서 캡처한 실제 화면입니다. 질의 설명용으로 추가한 `media/fleet-eta-sql.png`와 `media/fleet-weighted-sql.png`는 각각 해당 질의를 실제로 실행한 뒤 SQL·바인딩 패널 또는 SQL 영역을 잘라 캡처했습니다. 합성 결과나 원본 저장소의 캡처를 현재 화면으로 사용하지 않았습니다. 기존 기술 설명 문서의 이미지는 변경하지 않았습니다.
 
-이전 ETA 결과·SQL 캡처는 참고 2의 발표자 노트에 보존했습니다. `media/fleet-eta-conditions.png`는 `fleet-eta-sql.png`의 조건 부분만 잘라 확대한 이미지입니다. 해당 기본 ETA 질의는 리튬 배터리·Asia 조건을 포함하지 않으므로 7장의 복합 질의 결과나 바인딩 값으로 소개하지 않습니다. 반도체 질의의 실제 SQL 캡처는 8장 노트에 연결했습니다.
+기본 ETA 질의의 [결과 화면](media/fleet-eta-result.png), [SQL·바인딩 패널](media/fleet-eta-sql.png), [조건 확대 캡처](media/fleet-eta-conditions.png)를 보존했습니다. 조건 확대 캡처는 SQL·바인딩 패널의 조건 부분만 잘라 확대한 이미지입니다. 해당 질의는 리튬 배터리·Asia 조건을 포함하지 않으므로 7장의 복합 질의 결과나 바인딩 값으로 소개하지 않습니다. 8장 반도체 질의의 [실제 SQL 캡처](media/fleet-weighted-sql.png)도 확인할 수 있습니다.
 
 ## 출처와 라이선스
 
@@ -55,4 +54,6 @@ node docs/build-docs.mjs
 node docs/build-docs.mjs --check
 ```
 
-Markdown 원고를 수정한 뒤 HTML을 다시 생성합니다. 발표자료는 [slides-template.mjs](slides-template.mjs)에서 슬라이드 유형별로 배치하며, [slides-base.css](slides-base.css)를 읽어 결과 HTML에 포함합니다. 원본 HTML이나 보관 폴더 없이 문서를 생성할 수 있습니다. `--check`는 루트·인프라 README와 이 폴더의 문서에 있는 로컬 링크·이미지 존재, 발표자료와 노트의 번호·제목 일치, 생성 HTML의 최신 상태를 검사합니다. 출처와 라이선스 고지의 로컬 링크도 검사합니다. 코드와 설명의 의미가 일치하는지, 외부 URL이나 페이지 내부 앵커가 유효한지는 자동으로 검사하지 않습니다. 실행 전에 두 개발 서버를 시작하는 절차와 데모 주의사항은 [발표자 노트](presenter-notes.md)를 참고합니다.
+Markdown 원고를 수정한 뒤 HTML을 다시 생성합니다. 발표자료는 [slides-template.mjs](slides-template.mjs)에서 슬라이드 유형별로 배치하며, [slides-base.css](slides-base.css)를 읽어 결과 HTML에 포함합니다. 원본 HTML이나 보관 폴더 없이 문서를 생성할 수 있습니다. `--check`는 루트·인프라 README와 이 폴더의 문서에 있는 로컬 링크·이미지 존재, 발표자료 18장 구성, 생성 HTML의 최신 상태를 검사합니다. 출처와 라이선스 고지의 로컬 링크도 검사합니다. 코드와 설명의 의미가 일치하는지, 외부 URL이나 페이지 내부 앵커가 유효한지는 자동으로 검사하지 않습니다.
+
+앱 실행 절차는 [프로젝트 README](../README.md)를 따릅니다. 시연 전에는 대화와 검색 조건을 초기화하고 상태를 `All statuses`로 선택합니다. 채팅에는 화면의 상태 조건이 우선 적용됩니다. 데이터는 2026년 9월의 고정 샘플이므로 슬라이드의 절대 날짜를 사용하며, 모델이 해석한 실제 조건은 실행 내역에서 확인합니다.

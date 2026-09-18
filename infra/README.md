@@ -65,16 +65,17 @@ Nginx가 같은 origin의 `/api` 요청을 내부 backend ingress로 전달합�
 
 현재 배포된 HorizonDB를 그대로 사용할 때는 저장소 루트에서 다음 설정 스크립트를 실행합니다.
 스크립트가 DB 비밀번호와 Azure OpenAI subscription key를 화면에 표시하지 않는 입력으로 받습니다.
+아래 예제의 `<...>` 값은 사용자의 구독과 리소스 정보로 바꿉니다.
 `OpenAiEndpoint`에는 현재 사용 중인 리소스 endpoint를 입력합니다.
 
 ```powershell
 ./azd-hooks/configure.ps1 `
 	-EnvironmentName demo `
-	-SubscriptionId 'b214e225-c96c-489e-a778-a1f25bd40cdb' `
+	-SubscriptionId '<subscription-id>' `
 	-HorizonDbMode existing `
-	-ResourceGroupName 'rg-horizonship-app-demo-wus3' `
-	-ExistingHorizonDbResourceGroup 'rg-horizonship-dev-wus3' `
-	-ExistingHorizonDbClusterName 'horizonship-db-6prmjv3zxbvfs' `
+	-ResourceGroupName '<app-resource-group>' `
+	-ExistingHorizonDbResourceGroup '<existing-horizondb-resource-group>' `
+	-ExistingHorizonDbClusterName '<existing-horizondb-cluster>' `
 	-OpenAiEndpoint 'https://<foundry-resource>.openai.azure.com/'
 
 azd up
@@ -97,9 +98,9 @@ pipeline을 변경하지 않습니다. DB가 아직 초기화되지 않았을 �
 ```powershell
 ./azd-hooks/configure.ps1 `
 	-EnvironmentName demo-new `
-	-SubscriptionId 'b214e225-c96c-489e-a778-a1f25bd40cdb' `
+	-SubscriptionId '<subscription-id>' `
 	-HorizonDbMode create `
-	-ResourceGroupName 'rg-horizonship-demo-new-wus3' `
+	-ResourceGroupName '<new-resource-group>' `
 	-OpenAiEndpoint 'https://<foundry-resource>.openai.azure.com/'
 
 azd up
@@ -200,7 +201,7 @@ HorizonDB는 Preview이므로 별도 승인이 필요하면 스크립트로 우�
 다른 구독을 사용하려면 해당 실행에 `-SubscriptionId`를 지정합니다.
 
 ```powershell
-./infra/deploy.ps1 -Mode Check -SubscriptionId 'b214e225-c96c-489e-a778-a1f25bd40cdb'
+./infra/deploy.ps1 -Mode Check -SubscriptionId '<subscription-id>'
 ```
 
 실제 리소스를 만들기 전에 출력되는 구독 이름과 ID를 확인합니다.
@@ -314,6 +315,8 @@ key 인증을 허용하는 기존 Foundry를 별도로 준비해야 합니다.
 
 [configure-db-identity.ps1](configure-db-identity.ps1)과 [foundry-model-access.bicep](foundry-model-access.bicep)은
 Managed Identity 기반 DB 모델 호출을 검토할 때 쓰던 보조 파일이며 현재 앱의 필수 단계가 아닙니다.
+보조 스크립트의 기본 DB·Foundry 이름은 예제입니다. 실행할 때는 `-ResourceGroupName`, `-ClusterName`,
+`-FoundryName`에 대상 환경의 실제 이름을 지정합니다.
 2026-09-10 검증에서 `azure_ai` 2.2.2의 BYOM 등록은 Managed Identity 인증 미지원 오류를 반환했습니다.
 DB Identity와 RBAC만 추가해 이 제한을 해결할 수 있다고 가정하지 않습니다.
 현재 앱은 DB model registry에 subscription key를 등록합니다.
@@ -324,21 +327,21 @@ DB Identity와 RBAC만 추가해 이 제한을 해결할 수 있다고 가정하
 이미 Foundry를 배포했다면 [foundry-project.bicep](foundry-project.bicep)을 별도로 실행합니다.
 이 템플릿은 기존 Foundry를 `existing`으로 참조하고 System Assigned Identity가 있는 project 하나만 생성합니다.
 Foundry에 project management가 활성화되어 있어야 하며, `location`은 부모 Foundry와 같아야 합니다.
-아래 명령은 현재 배포된 리소스를 대상으로 하며 저장소 최상위 폴더에서 실행합니다.
+아래 예제의 `<...>` 값과 `location`을 사용자의 환경에 맞게 바꾸고 저장소 최상위 폴더에서 실행합니다.
 
 먼저 변경 내용을 확인합니다.
 
 ```powershell
 az deployment group what-if `
-	--subscription b214e225-c96c-489e-a778-a1f25bd40cdb `
-	--resource-group rg-horizonship-dev-wus3 `
+	--subscription '<subscription-id>' `
+	--resource-group '<foundry-resource-group>' `
 	--name horizonship-foundry-project `
 	--mode Incremental `
 	--template-file infra/foundry-project.bicep `
-	--parameters foundryName=horizonship-ai-6prmjv3zxbvfs projectName=horizonship location=westus3
+	--parameters 'foundryName=<foundry-resource-name>' projectName=horizonship location=westus3
 ```
 
-2026-09-10에 이 명령의 what-if가 성공했습니다. 결과는 `1 to create, 3 to ignore`이며,
+2026-09-10의 샘플 환경에서 같은 템플릿의 what-if가 성공했습니다. 결과는 `1 to create, 3 to ignore`이며,
 생성 대상은 `horizonship` project입니다. 기존 Foundry, HorizonDB, parameter group은 변경 대상에서 제외됩니다.
 Project의 실제 생성은 아직 실행하지 않았으며, what-if 성공이 실제 생성 성공을 보장하지는 않습니다.
 
@@ -346,12 +349,12 @@ Project만 실제로 생성하려면 다음 명령을 실행합니다. 이 명�
 
 ```powershell
 az deployment group create `
-	--subscription b214e225-c96c-489e-a778-a1f25bd40cdb `
-	--resource-group rg-horizonship-dev-wus3 `
+	--subscription '<subscription-id>' `
+	--resource-group '<foundry-resource-group>' `
 	--name horizonship-foundry-project `
 	--mode Incremental `
 	--template-file infra/foundry-project.bicep `
-	--parameters foundryName=horizonship-ai-6prmjv3zxbvfs projectName=horizonship location=westus3 `
+	--parameters 'foundryName=<foundry-resource-name>' projectName=horizonship location=westus3 `
 	--query properties.outputs --output json
 ```
 

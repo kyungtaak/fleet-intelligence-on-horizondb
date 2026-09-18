@@ -34,8 +34,8 @@ function az {
     $payload = switch -Regex ($command) {
         '^identity (list|show|create)' {
             $managedIdentity = @{
-                id = "/subscriptions/$testSubscription/resourceGroups/rg-horizonship-dev-wus3/providers/Microsoft.ManagedIdentity/userAssignedIdentities/horizonship-db-6prmjv3zxbvfs-model-access"
-                name = 'horizonship-db-6prmjv3zxbvfs-model-access'
+                id = "/subscriptions/$testSubscription/resourceGroups/rg-horizonship-dev-wus3/providers/Microsoft.ManagedIdentity/userAssignedIdentities/horizonship-db-example-model-access"
+                name = 'horizonship-db-example-model-access'
                 principalId = '22222222-2222-2222-2222-222222222222'
                 clientId = '33333333-3333-3333-3333-333333333333'
             }

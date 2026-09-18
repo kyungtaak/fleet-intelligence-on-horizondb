@@ -8,9 +8,9 @@ param(
     [ValidatePattern('^[a-zA-Z0-9_-]{1,80}$')]
     [string] $ResourceGroupName = 'rg-horizonship-dev-wus3',
     [ValidatePattern('^[a-zA-Z0-9][-a-zA-Z0-9]{0,61}[a-zA-Z0-9]$')]
-    [string] $ClusterName = 'horizonship-db-6prmjv3zxbvfs',
+    [string] $ClusterName = 'horizonship-db-example',
     [ValidatePattern('^[a-zA-Z0-9_-]+$')]
-    [string] $FoundryName = 'horizonship-ai-6prmjv3zxbvfs',
+    [string] $FoundryName = 'horizonship-ai-example',
     [ValidatePattern('^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[^/]+/providers/Microsoft.ManagedIdentity/userAssignedIdentities/[^/]+$')]
     [string] $IdentityResourceId
 )
