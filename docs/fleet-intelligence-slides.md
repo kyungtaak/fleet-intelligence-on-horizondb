@@ -256,7 +256,7 @@ status · metadata
 
 ```text
 배송별 텍스트 → vector(1536) 하나
-현재 pipeline에는 청킹 단계가 없음
+현재 샘플: ai.embed만 사용
 content_version 검사
 갱신 대기 중인 이전 벡터는 검색에서 제외
 ```

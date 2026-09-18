@@ -143,11 +143,11 @@ Python이 JSON과 ShipmentFilters를 검사하고 Agent Framework가 `search_shi
 
 trigger는 배송별 job 한 행을 upsert합니다. embedding_input은 필드를 합친 텍스트이고 content_version은 변경마다 증가합니다. 이는 이벤트마다 행을 추가하는 영구 이력 테이블이 아닙니다. 두 번째 변경 감지는 job을 source로 삼는 pipeline의 on_change입니다. `ai.table_source(shipment_embedding_jobs)` → `ai.embed(embedding_input, horizonship-embedding, 1536)` → `ai.table_sink(shipment_embeddings)` 순서이며 shipment_id 충돌 시 벡터와 버전을 upsert합니다.
 
-데모 지시: 오른쪽 SQL에서 `SELECT ai.create_pipeline(...)`과 `trigger => 'on_change'`를 가리킵니다. 이 선언은 [초기화 코드의 CREATE_PIPELINE_SQL](../backend/app/setup_database.py#L135)을 줄바꿈만 줄여 표시한 것입니다. `source`는 shipments가 아니라 job 테이블이며 `incremental_column`은 `updated_at`입니다. `steps`에서 embedding_input을 모델에 전달하고 `sink`에서 shipment_id 충돌을 처리합니다. 앞의 배송 trigger는 변경 대상을 선별하고, 이 설정은 job의 변경에 따라 pipeline을 실행합니다.
+데모 지시: 오른쪽에서 `create_pipeline`의 `source → steps → trigger → sink` 인터페이스를 차례로 가리킵니다. 이 선언은 [초기화 코드의 CREATE_PIPELINE_SQL](../backend/app/setup_database.py#L135)을 줄바꿈만 줄여 표시한 것입니다. `source`는 shipments가 아니라 job 테이블이며 `incremental_column`은 `updated_at`입니다. `steps`에는 `ai.embed`만 있고 chunk 단계는 없습니다. `trigger`는 `on_change`이며, `sink`에서 shipment_id 충돌을 처리합니다. 앞의 배송 trigger는 변경 대상을 선별하고, 이 설정은 job의 변경에 따라 pipeline을 실행합니다.
 
 `%s` 세 곳에는 pipeline 이름, 임베딩 모델 별칭, 충돌 시 UPDATE 절을 순서대로 바인딩합니다. 마지막 값은 [PIPELINE_SINK_ACTION](../backend/app/setup_database.py#L128)으로, embedding_input·content_version·updated_at·metadata·embedding을 새 값으로 갱신합니다. 화면의 SQL은 실제 파라미터화된 선언이므로 값을 바인딩하지 않고 SQL 편집기에 그대로 실행하는 예제가 아닙니다. 시연 중 pipeline을 다시 생성하지 않고 선언만 짧게 설명합니다.
 
-현재 pipeline에는 청킹 단계가 없습니다. 배송별 텍스트를 벡터 하나로 만듭니다. 긴 문서를 여러 청크로 나누는 구성을 추가하려면 청크 식별자와 sink 구조부터 별도로 설계해야 하므로 현재 구현처럼 설명하지 않습니다.
+`steps`에는 `ai.chunk()`를 포함할 수 있습니다([공식 step 유형](https://learn.microsoft.com/en-us/azure/horizondb/ai/ai-pipelines#step-types)). 슬라이드의 "chunk 포함 가능"은 API의 지원 범위를 뜻합니다. 현재 샘플은 `ai.embed`만 사용해 배송별 텍스트를 벡터 하나로 만듭니다. 긴 문서를 여러 청크로 나누는 구성을 추가하려면 청크 식별자와 sink 구조부터 별도로 설계해야 하므로 현재 구현처럼 설명하지 않습니다.
 
 검색 시 job이 없거나 job과 sink의 content_version이 같아야 해당 벡터를 사용합니다. 버전이 다르면 갱신 대기 중인 이전 벡터를 의미 검색에서 제외합니다. 정형·공간 조건만 사용하는 조회까지 막는 것은 아닙니다. 시연을 위해 스키마나 인덱스, 샘플을 다시 만들지 않습니다.
 
